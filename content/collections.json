@@ -1,0 +1,81 @@
+{
+  "collections": [
+    {
+      "id": "slow-days",
+      "slug": "slow-days",
+      "version": "v1",
+      "title": "把日子，过慢一点",
+      "subtitle": "暂别匆忙，去风景里停一会儿。",
+      "creator": "PaidDrive 创作组",
+      "description": "九幅安静的风景，留给生活里的片刻空白。这是 PaidDrive 的演示插画合集。",
+      "price_cents": 1900,
+      "currency": "CNY",
+      "preview_count": 3,
+      "items": [
+        {
+          "id": "01",
+          "file": "images/slow-days-v1/01.svg",
+          "title": "风穿过石门",
+          "width": 1200,
+          "height": 1500
+        },
+        {
+          "id": "02",
+          "file": "images/slow-days-v1/02.svg",
+          "title": "光落在海岸",
+          "width": 1200,
+          "height": 1500
+        },
+        {
+          "id": "03",
+          "file": "images/slow-days-v1/03.svg",
+          "title": "柔软的地平线",
+          "width": 1200,
+          "height": 1500
+        },
+        {
+          "id": "04",
+          "file": "images/slow-days-v1/04.svg",
+          "title": "山谷藏着秘密",
+          "width": 1200,
+          "height": 1500
+        },
+        {
+          "id": "05",
+          "file": "images/slow-days-v1/05.svg",
+          "title": "蓝色没有尽头",
+          "width": 1200,
+          "height": 1500
+        },
+        {
+          "id": "06",
+          "file": "images/slow-days-v1/06.svg",
+          "title": "橄榄色的午后",
+          "width": 1200,
+          "height": 1500
+        },
+        {
+          "id": "07",
+          "file": "images/slow-days-v1/07.svg",
+          "title": "沿着峡谷慢行",
+          "width": 1200,
+          "height": 1500
+        },
+        {
+          "id": "08",
+          "file": "images/slow-days-v1/08.svg",
+          "title": "海岸静下来",
+          "width": 1200,
+          "height": 1500
+        },
+        {
+          "id": "09",
+          "file": "images/slow-days-v1/09.svg",
+          "title": "留住最后一束光",
+          "width": 1200,
+          "height": 1500
+        }
+      ]
+    }
+  ]
+}

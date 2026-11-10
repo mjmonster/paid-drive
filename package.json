@@ -1,0 +1,7 @@
+{
+  "name": "paid-drive-local-preview",
+  "private": true,
+  "scripts": {
+    "dev": "python scripts/preview.py"
+  }
+}

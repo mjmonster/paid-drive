@@ -1,0 +1,28 @@
+# HOST NGINX ONLY: ACME-only bootstrap for a separate PaidDrive subdomain.
+# This file does not install certificates or modify the soccer website.
+# Render with scripts/render_deploy_config.py before enabling this server block.
+
+server {
+    listen 80;
+    server_name drive.example.com;
+
+    access_log /var/log/nginx/paiddrive.access.log;
+    error_log /var/log/nginx/paiddrive.error.log warn;
+    client_max_body_size 64k;
+
+    # Only ACME challenge files belong here, never paid collection files.
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/paiddrive-acme;
+        default_type text/plain;
+        try_files $uri =404;
+    }
+
+    location / {
+        # Never publish demo mode: simulated payment can unlock real files.
+        # Inspect the application through loopback or an SSH tunnel instead.
+        default_type text/plain;
+        charset utf-8;
+        add_header Retry-After 3600 always;
+        return 503 "网站正在准备中，请稍后再试。\n";
+    }
+}

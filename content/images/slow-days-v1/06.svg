@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1500" viewBox="0 0 1200 1500" role="img">
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1"><stop stop-color="#eee2be"/><stop offset="1" stop-color="#f4e3c7"/></linearGradient>
+    <filter id="grain"><feTurbulence type="fractalNoise" baseFrequency=".66" numOctaves="3" seed="66" stitchTiles="stitch"/><feColorMatrix type="saturate" values="0"/></filter>
+  </defs>
+  <rect width="1200" height="1500" fill="url(#sky)"/>
+  
+      <circle cx="360" cy="350" r="100" fill="#dec794"/>
+      <path d="M0 780Q250 620 560 760T1200 680V1500H0Z" fill="#bac099"/>
+      <path d="M0 1000Q380 700 760 960T1200 810V1500H0Z" fill="#929f70"/>
+      <path d="M0 1180Q390 960 700 1120T1200 1020V1500H0Z" fill="#6c815a"/>
+      <path d="M850 800C720 1000 770 1110 600 1220C480 1300 380 1410 375 1500H540C550 1360 650 1310 700 1260C850 1100 800 1000 890 830Z" fill="#dec9a1"/>
+      <g fill="#4d674b"><ellipse cx="170" cy="1055" rx="100" ry="75"/><ellipse cx="260" cy="1020" rx="90" ry="90"/><ellipse cx="350" cy="1060" rx="95" ry="70"/></g>
+      <path d="M270 1080 256 1310M270 1170 205 1100M266 1190 325 1100" fill="none" stroke="#6c6550" stroke-width="20"/>
+      <path d="M0 1390Q280 1300 570 1430T1200 1320V1500H0Z" fill="#4f6b4a"/>
+      <g fill="#7b8c61"><ellipse cx="960" cy="1220" rx="70" ry="50"/><ellipse cx="1030" cy="1190" rx="65" ry="65"/><ellipse cx="1090" cy="1225" rx="65" ry="45"/></g>
+      <path d="M1035 1230v120" stroke="#655d45" stroke-width="15"/>
+    
+  <rect width="1200" height="1500" filter="url(#grain)" opacity=".075"/>
+</svg>

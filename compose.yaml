@@ -1,0 +1,26 @@
+name: paid-drive
+
+services:
+  paid-drive:
+    build: .
+    restart: unless-stopped
+    init: true
+    env_file:
+      - .env
+    environment:
+      DATABASE_PATH: /data/paiddrive.sqlite3
+      CONTENT_ROOT: /app/content
+      MAIL_FILE_DIR: /data/outbox
+    ports:
+      - "127.0.0.1:${PAIDDRIVE_PORT:-8091}:8000"
+    volumes:
+      - ./data:/data
+      - ./content:/app/content:ro
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 30s

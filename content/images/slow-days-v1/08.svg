@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1500" viewBox="0 0 1200 1500" role="img">
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1"><stop stop-color="#687d88"/><stop offset="1" stop-color="#f4e3c7"/></linearGradient>
+    <filter id="grain"><feTurbulence type="fractalNoise" baseFrequency=".66" numOctaves="3" seed="88" stitchTiles="stitch"/><feColorMatrix type="saturate" values="0"/></filter>
+  </defs>
+  <rect width="1200" height="1500" fill="url(#sky)"/>
+  
+      <circle cx="850" cy="290" r="95" fill="#f0dfb8"/>
+      <circle cx="890" cy="260" r="90" fill="#6e828b"/>
+      <path d="M0 670H1200V1500H0Z" fill="#436d7e"/>
+      <path d="M0 930Q440 800 1200 910V1500H0Z" fill="#285567"/>
+      <path d="M0 1500V1000Q190 920 240 800Q320 750 420 820Q560 890 540 1000Q520 1150 790 1270Q980 1360 1200 1335V1500Z" fill="#c5b99a"/>
+      <path d="M0 1500V1120Q250 1020 330 890Q430 900 410 1030Q440 1210 650 1360Q730 1410 790 1500Z" fill="#777f70"/>
+      <path d="M540 1000Q520 1150 790 1270Q980 1360 1200 1335" fill="none" stroke="#e1d7b8" stroke-width="11"/>
+      <path d="M740 760h180M790 840h140M720 1040h320M850 1150h220" stroke="#9fb3b3" stroke-width="3" opacity=".55"/>
+      <g fill="#e6ddc2" opacity=".7"><circle cx="230" cy="260" r="3"/><circle cx="490" cy="180" r="3"/><circle cx="670" cy="430" r="2"/><circle cx="1070" cy="490" r="3"/></g>
+    
+  <rect width="1200" height="1500" filter="url(#grain)" opacity=".075"/>
+</svg>

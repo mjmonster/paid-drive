@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+  <meta name="theme-color" content="#f5f2eb">
+  <meta name="description" content="左右滑动，先看前三张。一次购买解锁整套图片，可反复查看和下载，无需注册。">
+  <title>PaidDrive — 喜欢的图片，一次解锁</title>
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/assets/app.css">
+  <script src="/assets/app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">跳到图片合集</a>
+  <div class="environment-banner" id="environmentBanner" hidden></div>
+  <header class="site-header">
+    <a class="brand" href="/" aria-label="PaidDrive 首页">
+      <svg class="brand-mark" width="31" height="34" viewBox="0 0 31 34" aria-hidden="true"><path d="M7 6H27V30H7z" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M3 2H23V26H3z" fill="var(--paper)" stroke="currentColor" stroke-width="1.5"/><path d="M8 9H18M8 14H18M8 19H14" stroke="currentColor" stroke-width="1.5"/></svg>
+      <span>PaidDrive<span class="brand-period">.</span></span>
+    </a>
+    <nav class="header-nav" aria-label="主导航">
+      <button class="text-button" type="button" data-action="restore">找回已购</button>
+      <button class="support-nav" type="button" data-action="support" aria-label="联系微信客服"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M21 11.5a8.5 8.5 0 0 1-8.5 8.5H6l-4 3V11.5A9.5 9.5 0 0 1 12.5 2 8.5 8.5 0 0 1 21 11.5Z"/><path d="M7 10h10M7 14h6"/></svg><span>客服</span></button>
+    </nav>
+  </header>
+  <main id="main" tabindex="-1">
+    <div class="loading-state" id="loadingState" role="status"><span class="loading-orbit"></span><span>正在打开合集…</span></div>
+    <div id="app" aria-busy="true"></div>
+  </main>
+  <footer class="site-footer"><span class="footer-brand">PaidDrive.</span><p>喜欢的画面，随时再看。</p><button class="text-button" data-action="support" type="button">微信客服 <span aria-hidden="true">↗</span></button></footer>
+  <div id="mobileBar"></div>
+  <dialog id="modal" aria-labelledby="modalTitle"><div id="modalContent"></div></dialog>
+  <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+  <noscript><div class="noscript">请启用浏览器的 JavaScript 功能，以预览、购买或找回图片合集。</div></noscript>
+</body>
+</html>
