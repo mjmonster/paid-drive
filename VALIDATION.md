@@ -1,6 +1,16 @@
 # PaidDrive MVP 验证记录
 
-## 本次更新：Mac 工作区安装与腾讯云部署文档
+## 2026-11-10：与现有腾讯云 CVM 部署方式对齐
+
+- 已读取相邻足球项目的 `AGENTS.md` 和权威 `docs/DEPLOYMENT-TENCENT.md`；后者记录 TencentOS Server 3.3、宿主机 Nginx/Certbot、已有 Docker 站点及 soccer 的 systemd/8090。未将已退役 AWS 指南作为部署步骤。
+- 重写英文逐步部署手册，明确 Mac/CVM/控制台操作位置，包含私有仓库只读 deploy key、可选 Compose 插件安装、SELinux、外置持久目录、磁盘临时文件、私下演示、DNS、证书、真实内容、ZPay/SMTP、验收、续期、备份、更新和恢复。
+- 仅修改文档；应用代码和部署模板未改动。没有连接或修改 CVM，没有复制相邻项目中的凭证值。
+- 本机重新运行现有部署配置测试：**6 项通过**。部署手册的 **39 个 Bash 代码块**通过 `bash -n`，**2 个内嵌 Python 代码块**通过语法解析；这不是实际部署执行记录。
+- 使用本机 Docker Compose v5.4.0 在临时目录执行真实配置合并，确认外置数据/内容挂载、SELinux `Z`、内容只读、`TMPDIR=/data/tmp`、镜像名及 `127.0.0.1:8091` 均正确；没有连接 Docker daemon 或启动容器。
+- 本机缺少项目指定的完整 Python 依赖，尚未在本次复核重跑全部 38 项应用测试；手册包含在 Python 3.12 镜像中执行完整测试的明确步骤。下方 38 项通过及浏览器记录属于原构建环境的历史验证。
+- 官方来源及兼容性条件记录于 `docs/CVM_DEPLOYMENT_RESEARCH.md`。真实服务器资源、Docker/Compose 版本、DNS、代理来源、商户、SMTP、证书和手机行为仍需按手册实测。
+
+## 历史记录：Mac 工作区安装与腾讯云部署文档
 
 - 新增详细中文 CVM 部署手册，覆盖原环境盘点、独立目录、子域名、权限、Docker、两阶段 Nginx／HTTPS、ZPay／SMTP、手机验收、备份及更新回滚。
 - 新增 Mac 安装脚本，默认创建 `/Users/mewtwo/Workspace/PaidDrive`；拒绝已有目标、符号链接、源目录嵌套，以及覆盖足球项目或原始图片目录。实际安装仅允许在 macOS 上运行。
@@ -55,9 +65,9 @@
 
 ## 仍需在部署环境完成的验证
 
-- `/Users/mewtwo/Workspace/soccer-match-analyzer` 和 `/Users/mewtwo/Images` 未挂载到本环境，未读取或修改这些目录。
-- Docker、Compose 和 nginx 文件是可移植模板，尚未与原有腾讯云 CVM 部署配置比对。
-- 本环境没有 Docker，未构建或运行容器镜像。
+- 已读取 `/Users/mewtwo/Workspace/soccer-match-analyzer` 的权威部署文档，未修改该项目；尚未读取或导入真实图片。
+- Docker、Compose 和 nginx 模板已与文档记载的 CVM 拓扑对齐；未读取服务器实时配置，需按手册 Step 1 核验。
+- 本次未构建或运行 PaidDrive 容器镜像，也未执行服务器上的 `nginx -t` 或证书操作。
 - 真实 ZPay 商户配置、实际网关地址、域名与 HTTPS、反向代理、SMTP 邮件投递和真实微信客服二维码仍需配置并联调。
 - **窄屏检查使用浏览器缩放，并非手机设备模拟或真机测试。** 尚未验证 iPhone/Android 的软键盘、触摸滑动、双指缩放、系统下载/相册行为、安全区域，以及微信内支付、跳转和返回原浏览器的完整流程。
 - 微信内浏览器与 Safari/Chrome 可能使用不同会话。真实商户 H5 支付与回跳需在目标手机上检查；未承诺无缝跨浏览器访问。

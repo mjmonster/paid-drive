@@ -2,11 +2,11 @@
 
 一个轻量的付费图片集 MVP：在手机上左右滑动一叠图片卡片，先预览三张图片，一次购买固定合集，之后可反复查看和下载。后端使用 Python/FastAPI，数据库使用 SQLite；前端为原生 HTML、CSS 和 JavaScript，不需要 Node 构建流程。
 
-**当前交付状态：**项目可在明确标注的演示模式下运行，内含九幅原创矢量风景占位插画，以及不可扫码的微信客服占位图。插画用于展示，不是实拍照片。目前尚未部署到腾讯云 CVM。构建环境无法访问 `/Users/mewtwo/Workspace/soccer-match-analyzer`，因此附带的 Docker/Compose/nginx 配置是可调整的部署模板，尚未与原项目核对。`/Users/mewtwo/Images` 也无法从该环境访问；可以在你的 Mac 上使用下文的导入命令。
+**当前交付状态：**项目可在明确标注的演示模式下运行，内含九幅原创矢量风景占位插画，以及不可扫码的微信客服占位图。插画用于展示，不是实拍照片。目前尚未部署到腾讯云 CVM。部署手册已核对相邻足球项目的权威 `docs/DEPLOYMENT-TENCENT.md`：复用已有腾讯云服务器的宿主机 Nginx、Certbot 和 Docker，为 PaidDrive 增加独立 Compose 项目及回环端口 8091。服务器当前状态仍需上线前复查；真实图片尚未导入。
 
 ## 项目位置与部署手册
 
-目标 Mac 工作目录为 **`/Users/mewtwo/Workspace/PaidDrive`**，与 `soccer-match-analyzer` 并列。此源包尚未写入你的 Mac；在 Mac 上解压压缩包、进入解压后的 `paid-drive` 根目录，执行以下命令即可先检查、再创建独立项目目录：
+当前 Mac 工作目录为 **`/Users/mewtwo/Workspace/PaidDrive`**，与 `soccer-match-analyzer` 并列，源码已存入私有仓库 [mjmonster/paid-drive](https://github.com/mjmonster/paid-drive)。现有目录无需再次安装。仅当从源码包安装到一个尚不存在的 Mac 目录时，才使用下面的安装器：
 
 ```bash
 python3 scripts/install_macos_workspace.py --dry-run
@@ -19,7 +19,7 @@ python3 scripts/install_macos_workspace.py
 - [腾讯云 CVM 与子域名详细部署手册](docs/TENCENT_CVM_DEPLOYMENT.md)：已有服务器检查、域名解析、Docker、目录权限、Nginx、HTTPS、ZPay、邮箱、验证、备份、更新与回滚。
 - [验证记录](VALIDATION.md)：已经完成的检查，以及仍需在真实服务器和手机上验证的部分。
 
-**原足球项目的第一份 CVM 部署指南尚未取得。**详细手册以“宿主机 Nginx + 独立 Docker Compose”为参考方案；如果原项目使用容器化反向代理、其他网关或不同证书管理方式，先按原项目结构调整，不能直接套用宿主机模板。
+**现有 CVM 拓扑已按足球项目文档核对。**足球应用本身使用原生 systemd 和端口 8090，另一站点已经使用 Docker。PaidDrive 使用现成的 Python 3.12 容器，复用宿主机代理。详细手册采用 `/opt/paiddrive` 保存源码、`/var/lib/paiddrive` 保存运行数据和真实内容；其服务器专用 Compose override 会替换下文便携模板的相对目录挂载。
 
 ## 已包含的功能
 
