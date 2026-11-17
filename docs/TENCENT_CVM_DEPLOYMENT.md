@@ -1,54 +1,144 @@
-# Deploy PaidDrive to your Tencent CVM
+# Deployment — Tencent Cloud CVM (co-tenant, Docker Compose)
 
-This runbook adds PaidDrive to the CVM documented in your soccer project's
-`docs/DEPLOYMENT-TENCENT.md`: **119.45.126.188, TencentOS Server 3.3, host Nginx
-and Certbot**. The soccer project's `AGENTS.md` identifies that guide as
-authoritative; its AWS deployment and redeployment guides are retired.
+Runbook for standing **PaidDrive** (FastAPI / Python 3.12 / SQLite, in Docker) up
+on the **existing, already-busy** Tencent Cloud CVM that serves the soccer
+project, on a **new subdomain** of a domain whose ICP filing is already approved.
 
-The server details below come from that document, not a live server inspection.
-Recheck them in Step 1. No CVM deployment has been performed for PaidDrive.
+This is **not** a fresh-box install. The CVM already runs three sites; we slot
+PaidDrive in **next to them** without disturbing anything that already works.
 
-The suggested new hostname is **drive.dolphincoder.cn**. Substitute your chosen
-hostname consistently if different. These are the intended resources:
+> **Companion docs:** the primary-source facts behind these steps →
+> [`CVM_DEPLOYMENT_RESEARCH.md`](CVM_DEPLOYMENT_RESEARCH.md); the local dev box →
+> [`MAC_WORKSPACE_SETUP.md`](MAC_WORKSPACE_SETUP.md); what the code itself has
+> been verified to do → [`VALIDATION.md`](../VALIDATION.md). Redeploy, restore,
+> troubleshooting and the security checklist are at the bottom of this file.
 
-| Resource | Existing services | PaidDrive |
-| --- | --- | --- |
-| Public entry | Host Nginx on 80/443 | One additional Nginx virtual host |
-| Application ports | 8000: dolphincoder.cn; 8080: Docker site 132855.cn; 8090: soccer systemd service | **127.0.0.1:8091** |
-| Runtime | Soccer uses native Java/systemd; another site already uses Docker | Existing Docker Engine, independent Compose project `paid-drive` |
-| Source checkout | Existing applications keep their paths | `/opt/paiddrive` |
-| Persistent state | Existing databases and uploads keep their paths | `/var/lib/paiddrive/data` and `/var/lib/paiddrive/content` |
-| Private configuration | Soccer's `/etc/soccer-match-analyzer.env` | `/opt/paiddrive/.env` |
-| Nginx configuration | Existing files, including `soccer.conf` | `/etc/nginx/conf.d/paiddrive.conf` |
-| Certificates | Existing Certbot installation and renewal scheduler | New certificate for the new hostname |
+> **Nothing has been deployed yet.** PaidDrive has never run on this CVM, and the
+> box facts below are copied from the soccer project's `docs/DEPLOYMENT-TENCENT.md`
+> — **not** from a live inspection. Step 1 re-verifies every one of them. The
+> commands here are instructions, not a log of commands already run.
 
-**Design decision — separation of concerns:** Nginx handles the shared HTTPS
-entry point, Docker supplies PaidDrive's Python 3.12 runtime, and persistent
-orders/images live outside the Git checkout so code updates cannot replace them.
-PaidDrive uses SQLite; it needs no new MySQL, Redis, Java or host Python runtime.
+---
 
-Run the numbered steps in order. Blocks marked **Mac**, **CVM**, or **Console**
-run in different places. Run one block at a time and stop on an unexpected error.
-In every new Mac terminal, set the shown SSH destination again. Carry your
-existing key option (`-i`) to both `ssh` and `scp`; a custom port uses `ssh -p`
-but **`scp -P`**. The examples use port 22 and your existing default SSH identity.
-Commands shown here are instructions, not commands already executed on the CVM.
+## This box, as found (`119.45.126.188`, TencentOS Server 3.3)
 
-## 1. Connect and verify the shared server
+TencentOS 3.x is **RHEL 8-compatible** — `dnf`, nginx `conf.d/`, `firewalld`, and
+**SELinux enforcing**. Docker Engine, nginx and certbot are already installed and
+already in use, so PaidDrive adds **no new runtime to the host**.
 
-**Mac:** use the same SSH account/key/port that already works for your soccer
-server. The old guide shows `root@119.45.126.188` as a transfer example; it does
-not establish that everyone should log in as root. Replace the account below;
-add your existing `-i` or `-p` options if needed.
+**Already running — DO NOT TOUCH:**
+
+| Port    | Process               | Site / role                    |
+|---------|-----------------------|--------------------------------|
+| 80, 443 | nginx (host)          | front door for every site below |
+| 8000    | uvicorn (Python)      | `dolphincoder.cn`              |
+| 8080    | Docker container      | `132855.cn`                    |
+| 8090    | Spring Boot (systemd) | `soccer.dolphincoder.cn`       |
+| 5432    | Postgres (Docker)     | the Python app's DB            |
+| 22      | sshd                  | SSH                            |
+
+**What PaidDrive adds:**
+
+| Resource          | PaidDrive's slot |
+|-------------------|------------------|
+| Application port  | **`127.0.0.1:8091`** — never public |
+| Runtime           | the **existing** Docker Engine; its own Compose project `paid-drive` |
+| Source checkout   | `/opt/paiddrive` (pinned commit, detached HEAD) |
+| Persistent state  | `/var/lib/paiddrive/data` (SQLite) and `/var/lib/paiddrive/content` (paid originals) |
+| Private config    | `/opt/paiddrive/.env` + `compose.override.yaml`, both `0600` |
+| Nginx             | **one added file**, `/etc/nginx/conf.d/paiddrive.conf` |
+| Certificate       | a new certbot lineage for the new hostname |
+
+**Nothing to install:** PaidDrive uses **SQLite** — no MySQL, no Redis, no Java,
+no host Python runtime. Host `python3` renders the nginx config and nothing else;
+the app, its tests, the importer and the backup all run inside the Python 3.12
+image.
+
+> **Design decision — separation of concerns.** nginx owns the shared HTTPS entry
+> point, Docker supplies the runtime, and orders/originals live outside the Git
+> checkout so a code update can never replace them.
+
+---
+
+## Target architecture
+
+```
+Internet ─▶ Nginx :80 / :443 ─┬─ dolphincoder.cn        ─▶ uvicorn      127.0.0.1:8000  (existing)
+                              ├─ 132855.cn              ─▶ docker       127.0.0.1:8080  (existing)
+                              ├─ soccer.dolphincoder.cn ─▶ Spring Boot  127.0.0.1:8090  (existing)
+                              └─ drive.dolphincoder.cn  ─▶ docker       127.0.0.1:8091  (NEW)
+                                                            │ paid-drive: UID/GID 10001,
+                                                            │ read-only rootfs, cap_drop ALL
+                                                            ├─▶ /var/lib/paiddrive/data    (SQLite, rw)
+                                                            └─▶ /var/lib/paiddrive/content (originals, ro)
+```
+
+- 8091 is published **on loopback only** (`127.0.0.1:8091:8000`) — no Security
+  Group change, ever.
+- Demo mode stays behind an SSH tunnel. **Never** serve `APP_MODE=demo` through
+  nginx: simulated payment unlocks any loaded collection.
+- Paid bytes are served by FastAPI *after* an access check. Never add an nginx
+  `root`/`alias` for the content tree.
+
+---
+
+## Placeholders
+
+| Placeholder | Meaning / value here |
+|-------------|----------------------|
+| `NEW_CVM_IP` | `119.45.126.188` (the shared CVM) |
+| `$PD_DOMAIN` | `drive.dolphincoder.cn` (the subdomain we serve) |
+| `$PD_PORT` | `8091` (loopback app port) |
+| `$PD_CVM` | `YOUR_EXISTING_SSH_USER@119.45.126.188` — the account/key that already works for soccer |
+| `$PD_AUDIT_DIR` | this deployment's rollback baseline, `/var/backups/paiddrive-<stamp>` — **record it** |
+| `REPLACE_WITH_*` | a value you must fill in from printed output |
+
+Unless a block is marked **Mac** or **Console**, **commands run on the CVM over
+SSH as a sudo-capable user.** Run one block at a time and stop on an unexpected
+error. The shell variables above live in that SSH session — **re-enter them after
+every reconnect.**
+
+> Carry your existing key/port options on both `ssh` and `scp`: a custom port is
+> `ssh -p` but **`scp -P`**. The examples assume port 22 and your default identity.
+
+---
+
+## Step 0 — Pre-flight (read once)
+
+1. **ICP — already covered.** `dolphincoder.cn` already serves 80/443 from this
+   mainland CVM, so its 备案 is already 接入'd to Tencent. A **二级域名** of an
+   already-filed domain needs **no new filing** — you only add a DNS record
+   (Step 7). Confirm the parent domain's current filing/access status in the
+   console anyway; the soccer doc's statement is not a fresh check.
+   [Tencent subdomain filing guidance](https://cloud.tencent.com/document/product/243/19630)
+2. **You are co-tenant.** Three sites must keep working the entire time. Every
+   step below is **additive**. If a command would edit another site's nginx file,
+   soccer's systemd unit, or the shared Docker daemon config, you've gone
+   off-script.
+3. **This box is SELinux-enforcing with rootful Docker.** Bind mounts carry `:Z`
+   private labels. Never relabel another site's directories, and never turn
+   SELinux off.
+4. **Money and paid files only become real at Step 11.** Steps 1–10 are private:
+   demo mode, SSH tunnel, and a public 503 holding page. The site opens to buyers
+   in Step 12, after acceptance.
+5. **Your Mac keeps the masters.** The CVM holds a working copy of the paid
+   images, not the only copy.
+
+---
+
+## Step 1 — Verify the shared box, save a rollback baseline
+
+**Mac** — log in with the account/key that already works for soccer:
 
 ```bash
 PD_CVM='YOUR_EXISTING_SSH_USER@119.45.126.188'
 ssh "$PD_CVM"
 ```
 
-**CVM:** use Bash for the following commands and retain this session. Re-enter
-these variables after reconnecting. `PD_STAMP` identifies this deployment's
-private audit directory; record its value for recovery.
+> The soccer doc shows `root@119.45.126.188` in a transfer example. That is not a
+> reason to log in as root.
+
+**CVM** — set this session's variables (re-enter them after any reconnect):
 
 ```bash
 bash
@@ -58,57 +148,56 @@ PD_STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 PD_AUDIT_DIR="/var/backups/paiddrive-$PD_STAMP"
 PD_DEPLOY_USER="$(id -un)"
 PD_DEPLOY_GROUP="$(id -gn)"
-printf 'Audit directory: %s\n' "$PD_AUDIT_DIR"
-
-cat /etc/os-release
-uname -m
-id
-df -h / /var /tmp
-free -h
-sudo ss -lntp
-sudo systemctl is-active nginx soccer-match-analyzer
-sudo nginx -t
-sudo docker version
-sudo docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Ports}}'
-sudo docker info --format '{{json .SecurityOptions}}'
-sudo certbot --version
-getenforce
-sudo getsebool httpd_can_network_connect
+printf 'Audit directory: %s\n' "$PD_AUDIT_DIR"      # record this value for recovery
 ```
 
-Check that Nginx owns 80/443, soccer still uses 8090, and **8091 is unused**.
-If 8091 is occupied, choose a free port and change `PD_PORT`, `.env`, Nginx and
-both sides of the SSH tunnel consistently. Record the existing containers and
-the status of all three existing websites. The old guide's free RAM/disk values
-are historical; use the current output above.
+Re-verify the box — the soccer doc's RAM/disk figures are historical, so trust
+this output instead:
 
-This guide assumes the existing **rootful Docker daemon without user-namespace
-remapping**, so container UID/GID 10001 maps to host 10001. If Docker reports
-`rootless` or `userns`, adapt the bind-mount ownership to its actual mapping before
-proceeding; do not change the shared daemon configuration to fit this guide.
+```bash
+cat /etc/os-release; uname -m; id        # RHEL8-compatible, arch, your sudo rights
+df -h / /var /tmp; free -h               # room for originals + ZIPs + snapshots
+sudo ss -lntp                            # nginx owns 80/443, soccer 8090, 8091 FREE
+sudo systemctl is-active nginx soccer-match-analyzer     # active, active
+sudo nginx -t                            # must already pass before you add anything
+sudo docker version                      # Engine present
+sudo docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Ports}}'
+sudo docker info --format '{{json .SecurityOptions}}'    # expect rootful, NO userns
+sudo certbot --version
+getenforce                               # expect Enforcing
+sudo getsebool httpd_can_network_connect # nginx already proxies :8000/:8080/:8090
+```
 
-Keep the existing firewall rules. The new application needs no public 8091,
-SQLite, SMTP or Docker port. Check the Tencent security group still permits
-public 80/443 and your existing restricted SSH access. For an older Docker
-Engine, note the official [pre-28 localhost-publication caveat](https://docs.docker.com/engine/network/port-publishing/):
-same-layer-2 peers may reach a localhost-published port. Resolve any exposure
-before loading paid originals; plan any Engine upgrade separately from this
-deployment.
+- **8091 must be unused.** If it is taken, pick a free port and change `PD_PORT`,
+  `.env`, the nginx render and **both ends** of the SSH tunnel consistently.
+- **UID/GID mapping:** this runbook assumes **rootful Docker with no
+  user-namespace remapping**, so container `10001` is host `10001`. If
+  `docker info` reports `rootless` or `userns`, adapt the bind-mount ownership to
+  the real mapping — do **not** reconfigure the shared daemon to suit this guide.
+- **Engine age:** before Engine 28, a localhost-published port could be reachable
+  from same-layer-2 peers
+  ([port-publishing caveat](https://docs.docker.com/engine/network/port-publishing/)).
+  Resolve any such exposure **before** loading paid originals, and plan an Engine
+  upgrade separately from this deployment.
+- **Firewall:** leave it as-is. Confirm the Tencent Security Group still permits
+  public 80/443 and your existing restricted SSH. PaidDrive needs no public 8091,
+  SQLite, SMTP or Docker port.
 
-Save the current Nginx state privately:
+Save the rollback baseline, then confirm `conf.d/*.conf` is included and that
+`drive.dolphincoder.cn` is not already claimed:
 
 ```bash
 sudo install -d -m 0700 "$PD_AUDIT_DIR"
 sudo tar -czf "$PD_AUDIT_DIR/nginx-before.tar.gz" -C /etc nginx
 sudo bash -c 'nginx -T > "$1/nginx-before.txt" 2>&1' _ "$PD_AUDIT_DIR"
 sudo bash -c 'docker ps --no-trunc > "$1/containers-before.txt"' _ "$PD_AUDIT_DIR"
+sudo grep -n 'conf\.d\|server_name' "$PD_AUDIT_DIR/nginx-before.txt" | head -40
 ```
 
-Inspect the saved Nginx configuration on the server to confirm that it includes
-`/etc/nginx/conf.d/*.conf`, and that `drive.dolphincoder.cn` is not already used.
-Do not paste complete server configuration or private environment files into chat.
+> Read those files **on the server**. Do not paste whole server configurations or
+> private environment files into a chat.
 
-**Mac:** record baseline responses before making changes:
+**Mac** — record the baseline the other three sites must still match in Step 12:
 
 ```bash
 curl -I https://dolphincoder.cn/
@@ -116,28 +205,23 @@ curl -I https://132855.cn/
 curl -I https://soccer.dolphincoder.cn/matches
 ```
 
-## 2. Check Docker Compose
+---
 
-**CVM:**
+## Step 2 — Docker Compose plugin (verify; install only if absent)
 
 ```bash
-sudo docker compose version
+sudo docker compose version      # if this works, keep it and go to Step 3
 sudo docker compose ls
-command -v git
-python3 --version
+command -v git; python3 --version
 ```
 
-If Compose works, retain it and go to Step 3. Host `python3` is used only for
-the small standard-library configuration renderer; the app, tests, import and
-backup run in the Python 3.12 image. If `git` or `python3` is missing, install
-only that missing utility with TencentOS's `dnf`, reviewing the transaction.
+If `git` or `python3` is missing, install **only** that one utility with
+TencentOS's `dnf`, reviewing the transaction first.
 
-If Compose is absent, install only its CLI plugin. Do not reinstall, upgrade or
-restart the shared Docker daemon. The following optional block pins the official
-Compose **v5.7.0** release and verifies its published binary digest. It refuses
-to overwrite an existing plugin. A working plugin in a different path should
-be reused instead. [Docker plugin installation](https://docs.docker.com/compose/install/linux/),
-[official release](https://github.com/docker/compose/releases/tag/v5.7.0).
+If Compose is absent, install **only its CLI plugin** — never reinstall, upgrade
+or restart the shared daemon. This pins [Compose **v5.7.0**](https://github.com/docker/compose/releases/tag/v5.7.0),
+verifies its digest, and refuses to overwrite an existing plugin
+([install docs](https://docs.docker.com/compose/install/linux/)):
 
 ```bash
 (
@@ -163,22 +247,29 @@ be reused instead. [Docker plugin installation](https://docs.docker.com/compose/
 )
 ```
 
-This manual plugin does not auto-update. A client/Engine compatibility error
-needs a separate decision about the existing Engine, not an automatic daemon
-upgrade. A blocked download should be fetched from the same official source on
-your Mac, checksum-verified, then transferred to the CVM; do not substitute an
-unknown mirror or run a remote shell installer.
+> A manual plugin does **not** auto-update, and a client/Engine compatibility
+> error is a decision about the shared Engine — never a reason to auto-upgrade the
+> daemon. Reuse a working plugin at another path instead of duplicating it. If the
+> download is blocked, fetch and checksum it from the same official source on your
+> Mac and transfer it — never an unknown mirror or a piped remote installer.
 
-## 3. Give the CVM read access to the private repository
+---
 
-The repository is [mjmonster/paid-drive](https://github.com/mjmonster/paid-drive).
-Your Mac's working GitHub login does not automatically authenticate the CVM.
-If the CVM already has an identity authorized for **this** repository, verify it
-with `git ls-remote git@github.com:mjmonster/paid-drive.git refs/heads/main` and
-skip new key creation. An existing soccer-specific deploy key cannot be reused
-as another repository's deploy key.
+## Step 3 — Deploy key for the private repository
 
-Otherwise, **CVM**, as the deployment user:
+Repository: [mjmonster/paid-drive](https://github.com/mjmonster/paid-drive). **Your
+Mac's working GitHub login does not authenticate the CVM.** If the CVM already
+has an identity authorized for *this* repository, verify it and skip the key:
+
+```bash
+git ls-remote git@github.com:mjmonster/paid-drive.git refs/heads/main
+# a commit SHA + refs/heads/main = done; then use PD_GIT_SSH='ssh' in Step 4
+```
+
+> A deploy key is scoped to one repository: soccer's existing deploy key **cannot**
+> be reused here.
+
+Otherwise create a dedicated read-only key as the deployment user:
 
 ```bash
 install -d -m 0700 "$HOME/.ssh"
@@ -189,36 +280,38 @@ PD_KEY="$HOME/.ssh/paiddrive_deploy_ed25519"
   test ! -e "$PD_KEY.pub"
   ssh-keygen -t ed25519 -C 'paid-drive CVM read-only deploy key' -f "$PD_KEY"
 )
-cat "$PD_KEY.pub"
+cat "$PD_KEY.pub"          # copy ONLY this public line
 ```
 
 Choose a passphrase according to your server's key policy; enter it interactively
-when Git needs it, or load the key into your existing agent. Keep the private
-file on the CVM. Copy **only the `.pub` output**.
+when Git needs it, or load the key into your existing agent. The private file
+stays on the CVM.
 
-**GitHub Console:** repository → Settings → Deploy keys → Add deploy key.
-Name it `Tencent CVM PaidDrive`, paste the public key, and leave **Allow write
-access unchecked**. [GitHub deploy keys](https://docs.github.com/en/authentication/connecting-to-github-with-ssh/managing-deploy-keys).
+**GitHub Console:** repository → Settings → Deploy keys → Add deploy key. Name it
+`Tencent CVM PaidDrive`, paste the public key, and leave **Allow write access
+unchecked**
+([GitHub deploy keys](https://docs.github.com/en/authentication/connecting-to-github-with-ssh/managing-deploy-keys)).
 
-**CVM:** for the new key, set a repository-specific SSH command; do not replace
-your existing `~/.ssh/config` or other keys:
+Bind the new key to this repository only — do not replace `~/.ssh/config` or your
+other keys:
 
 ```bash
 PD_GIT_SSH="ssh -i $PD_KEY -o IdentitiesOnly=yes"
 GIT_SSH_COMMAND="$PD_GIT_SSH" git ls-remote \
-  git@github.com:mjmonster/paid-drive.git refs/heads/main
+  git@github.com:mjmonster/paid-drive.git refs/heads/main   # SHA + refs/heads/main
 ```
 
-On first connection, compare the presented host-key fingerprint with
-[GitHub's published fingerprints](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/githubs-ssh-key-fingerprints)
-before accepting. Expect a commit hash followed by `refs/heads/main`. Do not
-disable SSH host-key verification. If you reused an existing identity, set
-`PD_GIT_SSH='ssh'` instead for the next step.
+> On first connection, compare the offered host-key fingerprint against
+> [GitHub's published fingerprints](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/githubs-ssh-key-fingerprints)
+> before accepting. Never disable SSH host-key verification.
 
-## 4. Clone a known source release
+---
 
-**CVM:** these paths must be new. If either exists, stop and inspect it; an
-existing deployment belongs in Step 15, not this first-install procedure.
+## Step 4 — Clone and pin the source release
+
+Both paths must be new. If either exists, stop and inspect it — an existing
+deployment belongs in [Redeploying](#redeploying-after-code-changes), not in this
+first install.
 
 ```bash
 (
@@ -231,20 +324,21 @@ existing deployment belongs in Step 15, not this first-install procedure.
   cd /opt/paiddrive
   git config core.sshCommand "$PD_GIT_SSH"
   git checkout --detach d522b124e125e7911ee07bd76186213dfacdc1db
-  git rev-parse HEAD
+  git rev-parse HEAD                      # record this SHA
 )
 cd /opt/paiddrive
 ```
 
-The pinned commit above is the initial 47-file source release already verified
-against your Mac. It contains the app, Docker configuration, sample images,
-tests and deployment helpers. A detached checkout here intentionally pins the
-deployed version. Record its SHA; later updates select another reviewed commit.
+> **Why detached:** the deployed version is pinned deliberately rather than
+> tracking `main`. That commit is the 47-file initial source release already
+> verified against your Mac — app, Docker configuration, sample images, tests and
+> deployment helpers. Later updates select another reviewed commit.
+
 Do not run the Mac workspace installer on the CVM.
 
-## 5. Create private configuration and persistent directories
+---
 
-**CVM:**
+## Step 5 — Private configuration and persistent directories
 
 ```bash
 cd /opt/paiddrive
@@ -277,22 +371,21 @@ sudo find /var/lib/paiddrive/content -type f -exec chmod 0640 {} +
 chmod 0600 .env compose.override.yaml
 ```
 
-Compose automatically combines `compose.yaml` with `compose.override.yaml`.
-Volume entries merge by container target, so these replace the repository's
-`./data` and `./content` bindings. The override is local server configuration,
-excluded from Git. It gives the built image a predictable tag and puts Python's
-temporary ZIP files/SQLite backup snapshots on private disk instead of filling
-RAM-backed `/tmp`. Provision disk for originals, concurrent ZIPs, database
-snapshots and backup archives.
+> **Why an override file:** Compose merges it into `compose.yaml`, and volumes
+> merge **by container target** — so these two replace the repo's `./data` and
+> `./content` bindings. It is local config, excluded from Git, and it pins the
+> image tag and moves temp ZIPs and SQLite snapshots off RAM-backed `/tmp`.
 
-`:Z` gives these dedicated directories a private SELinux container label;
-`:ro,Z` also makes originals read-only to the app. Never relabel another site's
-directories or disable SELinux. Before the service starts, one-off Compose
-commands are fine; after startup use `compose exec` for inspections so another
-container does not relabel its active private mounts.
-[Docker bind-mount labels](https://docs.docker.com/engine/storage/bind-mounts/#configure-the-selinux-label).
+> **Why `:Z`:** a private SELinux label for these dedicated directories; `:ro,Z`
+> also makes originals read-only to the app. Never relabel another site's
+> directories; never disable SELinux. One-off Compose commands are fine before
+> startup — **after** it, inspect via `compose exec` so a second container does not
+> relabel the live mounts.
+> [Bind-mount labels](https://docs.docker.com/engine/storage/bind-mounts/#configure-the-selinux-label)
 
-Edit `.env` with your preferred terminal editor, e.g. `vi .env`. Start with:
+Provision disk for originals, concurrent ZIPs, DB snapshots and backup archives.
+
+Edit `.env` with your preferred editor (`vi .env`). Start in **demo**:
 
 ```dotenv
 APP_MODE=demo
@@ -306,15 +399,17 @@ ZPAY_KEY=
 SUPPORT_QR_PATH=
 ```
 
-Keep the other sample settings. If you selected another port, change both
-`APP_URL` and `PAIDDRIVE_PORT`. Compose supplies the container paths for SQLite,
-content and mail. Do not copy the soccer environment file or its credential
-examples. Use `docker compose config --quiet`, not a command that prints all
-expanded credentials.
+Keep the other sample settings — Compose supplies the container paths for SQLite,
+content and mail. If you chose another port, change **both** `APP_URL` and
+`PAIDDRIVE_PORT`.
 
-## 6. Build, run tests and start the private demo
+> Do **not** copy soccer's environment file or its credential examples. Validate
+> with `docker compose config --quiet`, never with a command that prints the
+> expanded configuration and its secrets.
 
-**CVM:**
+---
+
+## Step 6 — Build, run the tests, start the private demo
 
 ```bash
 cd /opt/paiddrive
@@ -329,15 +424,16 @@ cd /opt/paiddrive
 )
 ```
 
-Expect **38 tests passed** for the pinned source release. The tests use temporary
-databases and mocked payment responses; they do not charge customers or send
-real mail. The extra mounts are necessary because the runtime image does not
-contain `tests/` or the Nginx templates in `deploy/`. A failed dependency download,
-build or test must be resolved before continuing. Use the server's established
-trusted registry/network setup if Docker Hub or PyPI cannot be reached; do not
-modify the shared Docker daemon just to try an arbitrary mirror.
+Expect **38 tests passed** on the pinned release. The suite uses temporary
+databases and mocked payments — no customer is charged, no real mail is sent. The
+extra mounts are needed because the runtime image carries neither `tests/` nor
+`deploy/`.
 
-Check mount readability as the image's actual UID 10001, then start:
+> Resolve any failed download, build or test before continuing. If Docker Hub or
+> PyPI is unreachable, use the box's established trusted route — do not modify the
+> shared daemon to try an arbitrary mirror.
+
+Prove the mounts are readable as the image's real UID 10001, then start:
 
 ```bash
 (
@@ -360,50 +456,45 @@ PY
 sudo docker compose up -d --wait --wait-timeout 180 paid-drive
 sudo docker compose ps
 sudo docker compose logs --tail=50 paid-drive
-curl -fsS "http://127.0.0.1:$PD_PORT/health"
-sudo docker compose port paid-drive 8000
+curl -fsS "http://127.0.0.1:$PD_PORT/health"      # {"status":"ok","mode":"demo"}
+sudo docker compose port paid-drive 8000          # 127.0.0.1:8091
 )
 ```
 
-Expected health: `{"status":"ok","mode":"demo"}`. Expected published port:
-`127.0.0.1:8091`. Allow the health check time to become healthy. Docker manages
-restarts with `unless-stopped`; do not create a second systemd app service or
-launch an extra Uvicorn process on the host.
+Allow the health check time to go healthy. Docker restarts it via
+`unless-stopped` — do **not** add a second systemd service or a stray host Uvicorn.
 
-**Mac, separate terminal:** keep this tunnel open, using your existing SSH
-account/key options:
+**Mac, separate terminal** — keep this tunnel open:
 
 ```bash
 PD_CVM='YOUR_EXISTING_SSH_USER@119.45.126.188'
 ssh -N -L 8091:127.0.0.1:8091 "$PD_CVM"
 ```
 
-Open **http://localhost:8091/c/slow-days**. Check three free previews, a locked
-fourth card, explicitly labelled simulated payment, unlock, individual download,
-ZIP, refresh and revisit. Test email recovery through the private file-mail
-outbox if needed; it does not send real mail. Never expose demo mode through
-Nginx: simulated payment can unlock any loaded collection.
+Open **http://localhost:8091/c/slow-days** and walk the flow: three free
+previews, a locked fourth card, the labelled simulated payment, unlock, single
+download, ZIP, refresh, revisit. Email recovery can be tested through the private
+file-mail outbox; it sends nothing real.
 
-## 7. Add the DNS record and ACME preparation site
+> **Never expose demo mode through nginx** — simulated payment can unlock any
+> loaded collection.
 
-**Tencent DNSPod Console:** choose the existing `dolphincoder.cn` zone. Check
-whether `drive` already exists before making any change. For an unused hostname,
-add:
+---
 
-| Setting | Value |
-| --- | --- |
-| Host record | `drive` |
-| Type | `A` |
-| Value | `119.45.126.188` |
-| TTL | 600 seconds, or the console's supported default |
+## Step 7 — DNS record and the ACME preparation site
+
+**Tencent DNSPod Console** → the existing `dolphincoder.cn` zone. Check whether
+`drive` already exists before changing anything. For an unused hostname, **add**:
+
+| 主机记录 (Host) | 记录类型 (Type) | 记录值 (Value)   | TTL |
+|-----------------|-----------------|------------------|-----|
+| `drive`         | `A`             | `119.45.126.188` | 600 |
 
 Keep the existing `@`, `soccer` and other records. Do not add AAAA without a
-working IPv6 destination. Confirm the parent domain's current Tencent filing/
-access status in the console; the old guide's statement is not a fresh check.
-[Tencent subdomain filing guidance](https://cloud.tencent.com/document/product/243/19630).
+working IPv6 destination.
 
-**CVM:** generate the HTTP preparation site. The host renderer uses standard
-Python 3 libraries and refuses to overwrite an existing output file.
+**CVM** — render and install the HTTP preparation vhost. The renderer uses only
+the Python 3 standard library and refuses to overwrite an existing output file:
 
 ```bash
 cd /opt/paiddrive
@@ -412,56 +503,58 @@ sudo restorecon -RF /var/www/paiddrive-acme
 PD_HTTP_CONF="/tmp/paiddrive-http-$PD_STAMP.conf"
 python3 scripts/render_deploy_config.py --domain "$PD_DOMAIN" \
   --phase http --port "$PD_PORT" --output "$PD_HTTP_CONF"
-cat "$PD_HTTP_CONF"
+cat "$PD_HTTP_CONF"                       # review before installing
 (
   set -eu
   test ! -e /etc/nginx/conf.d/paiddrive.conf
   sudo install -m 0644 "$PD_HTTP_CONF" /etc/nginx/conf.d/paiddrive.conf
-  sudo nginx -t
+  sudo nginx -t                           # must pass; no reload happens otherwise
   sudo systemctl reload nginx
 )
 printf 'paiddrive-acme-ok\n' | sudo tee \
   /var/www/paiddrive-acme/.well-known/acme-challenge/paiddrive-check >/dev/null
 ```
 
-If `nginx -t` fails, no reload occurs. Fix the new file, or move only that new
-PaidDrive file into the private audit directory, then validate again. Existing
-Nginx workers continue serving the current configuration.
+> If `nginx -t` fails, nothing is reloaded and the existing workers keep serving
+> the current configuration. Fix the new file, or move **only** PaidDrive's new
+> file into `$PD_AUDIT_DIR`, then validate again.
 
 **Mac:**
 
 ```bash
-dig +short A drive.dolphincoder.cn
-dig +short AAAA drive.dolphincoder.cn
+dig +short A drive.dolphincoder.cn        # 119.45.126.188
+dig +short AAAA drive.dolphincoder.cn     # empty unless you really run IPv6
 curl -fsS http://drive.dolphincoder.cn/.well-known/acme-challenge/paiddrive-check
-curl -i http://drive.dolphincoder.cn/
-curl -I https://soccer.dolphincoder.cn/matches
+                                          # paiddrive-acme-ok
+curl -i http://drive.dolphincoder.cn/     # 503 — the intended holding page
+curl -I https://soccer.dolphincoder.cn/matches    # unchanged
 ```
 
-Expect the A result to be the CVM IP, the challenge response to be
-`paiddrive-acme-ok`, and the new site's `/` to return **503**. This is the intended
-preparation page. The application is still private. HTTP-01 certificate
-validation uses public port 80. [Let's Encrypt HTTP-01](https://letsencrypt.org/docs/challenge-types/#http-01-challenge).
+The 503 is correct: the application is still private, and HTTP-01 validation only
+needs port 80.
+[Let's Encrypt HTTP-01](https://letsencrypt.org/docs/challenge-types/#http-01-challenge)
 
-## 8. Obtain the new HTTPS certificate
+---
 
-**CVM:** reuse the existing Certbot installation. Webroot obtains the certificate
-without asking Certbot to rewrite any site's Nginx configuration.
+## Step 8 — Obtain the HTTPS certificate (webroot)
+
+**CVM** — reuse the existing certbot installation. Webroot gets the certificate
+without letting certbot rewrite any site's nginx configuration:
 
 ```bash
-sudo certbot certificates
+sudo certbot certificates                 # inspect what already exists first
 sudo certbot certonly --webroot --webroot-path /var/www/paiddrive-acme \
   --cert-name "$PD_DOMAIN" -d "$PD_DOMAIN"
-sudo certbot certificates
+sudo certbot certificates                 # confirm the exact hostname + real paths
 ```
 
-Follow Certbot's account/email prompts. Confirm the certificate covers the exact
-hostname, and note its actual fullchain/private-key paths. Normally these are
+Follow certbot's account/email prompts. Normal paths are
 `/etc/letsencrypt/live/drive.dolphincoder.cn/fullchain.pem` and `privkey.pem`.
-If a certificate with this name already existed, inspect it before issuance;
-do not overwrite an unrelated certificate.
 
-Generate the final proxy configuration, but do not install it yet:
+> If a certificate with this name already existed, inspect it before issuance —
+> do not overwrite an unrelated lineage.
+
+Render the final proxy configuration, but **do not install it yet**:
 
 ```bash
 PD_HTTPS_CONF="/tmp/paiddrive-https-$PD_STAMP.conf"
@@ -470,18 +563,20 @@ python3 scripts/render_deploy_config.py --domain "$PD_DOMAIN" \
 cat "$PD_HTTPS_CONF"
 ```
 
-If Certbot reports different paths, edit only the two certificate paths in the
-generated file. Keep the existing HTTP preparation site active through Step 11.
-The HTTPS template sends every application/media request through FastAPI;
-do not add a static `root` or `alias` for the paid originals.
+If certbot reported different paths, edit **only** the two certificate paths in
+the generated file. The HTTP preparation site stays active until Step 12.
 
-## 9. Load your real collection and support QR code
+> The HTTPS template routes every application/media request through FastAPI. Do
+> **not** add a static `root` or `alias` for the paid originals.
 
-This step is required before selling your own content. The repository contains
-nine generated sample SVGs and a non-scannable support placeholder.
+---
 
-**CVM:** stop only PaidDrive while changing content. Create a private incoming
-directory and record the printed path:
+## Step 9 — Load your real collection and support QR code
+
+Required before selling your own content: the repository ships nine generated
+sample SVGs and a deliberately non-scannable support placeholder.
+
+**CVM** — stop only PaidDrive while content changes, and record the printed path:
 
 ```bash
 cd /opt/paiddrive
@@ -491,10 +586,10 @@ chmod 0700 "$PD_INCOMING"
 printf 'Upload destination: %s\n' "$PD_INCOMING"
 ```
 
-**Mac:** select the source images and the actual support QR file. Replace the
-remote directory with the exact value printed above. `scp -r` below creates an
-`Images` subdirectory inside it; supported image files must be directly inside
-the selected folder. Use at least four images for three free previews.
+**Mac** — upload the source images and the real support QR, replacing the remote
+directory with the exact value printed above. `scp -r` creates an `Images`
+subdirectory inside it, and supported image files must sit **directly** in the
+folder you select. Use at least four images so three can be free previews:
 
 ```bash
 PD_CVM='YOUR_EXISTING_SSH_USER@119.45.126.188'
@@ -504,13 +599,14 @@ scp /absolute/path/to/your-real-wechat-qr.png \
   "$PD_CVM:$PD_REMOTE_INCOMING/wechat.png"
 ```
 
-Confirm the QR identifies your intended support account. If it is JPEG, keep
-its real extension and use that path consistently; renaming does not convert it.
+> Confirm the QR really identifies your intended support account. If it is a
+> JPEG, keep its real extension and use that path consistently — renaming does
+> not convert the format.
 
-**CVM:** import with the built Python 3.12 image, not TencentOS's system Python.
-This importer copies files, naturally sorts their names, and refuses an existing
-collection version. Adjust title, slug and price before running; `1900` means
-CNY 19.00. Choose the first three source images deliberately.
+**CVM** — import with the built image, not TencentOS's system Python. The importer
+copies files, sorts names naturally, and refuses an existing collection version.
+Set title, slug and price first (`1900` = CNY 19.00), and choose the first three
+images deliberately — those are the free previews:
 
 ```bash
 sudo docker run --rm --network none --read-only --tmpfs /tmp \
@@ -527,29 +623,30 @@ sudo find /var/lib/paiddrive/content -type d -exec chmod 0750 {} +
 sudo find /var/lib/paiddrive/content -type f -exec chmod 0640 {} +
 ```
 
-Review `/var/lib/paiddrive/content/collections.json` in your editor. The importer
-appends your collection; remove the `slow-days` **manifest entry** before live
-launch if you do not intend to sell the demo. Keep the JSON `collections` array
-valid. After sales, preserve every sold version's files and IDs; updates need a
-new version and directory. Never use `rsync --delete` on this content tree.
+Review `/var/lib/paiddrive/content/collections.json`. The importer **appends**
+your collection; if you will not sell the demo, remove the `slow-days` **manifest
+entry**, keeping the `collections` array valid.
 
-Set `SUPPORT_QR_PATH=/app/content/support/wechat.png` in `.env`. Then recreate
-the demo container so its private SELinux mount label is applied again:
+> **Sold content is immutable.** After any sale, preserve every sold version's
+> files and IDs — new content means a new version and a new directory. Never run
+> `rsync --delete` against this tree.
+
+Set `SUPPORT_QR_PATH=/app/content/support/wechat.png` in `.env`, then recreate the
+container so the private SELinux mount label is reapplied:
 
 ```bash
 sudo docker compose up -d --force-recreate --wait --wait-timeout 180 paid-drive
-curl -fsS "http://127.0.0.1:$PD_PORT/health"
+curl -fsS "http://127.0.0.1:$PD_PORT/health"      # {"status":"ok","mode":"demo"}
 ```
 
-Through the existing Mac SSH tunnel, open
-**http://localhost:8091/c/my-collection** and verify order, price, previews,
-simulated unlock, images, ZIP and QR. Treat the incoming directory as private;
-remove only that staging copy after confirming the imported files, retaining
-your Mac originals. Do not commit real configurations or runtime assets.
+Through the tunnel, open **http://localhost:8091/c/my-collection** and verify
+order, price, previews, simulated unlock, images, ZIP and QR. The incoming
+directory is private: once the import is confirmed remove only that staging copy,
+keeping your Mac originals. Never commit real config or runtime assets.
 
-## 10. Set the actual trusted proxy source
+---
 
-**CVM:**
+## Step 10 — Pin the actual trusted proxy source
 
 ```bash
 curl -fsS "http://127.0.0.1:$PD_PORT/health"
@@ -557,63 +654,66 @@ sudo docker compose logs --tail=30 paid-drive
 sudo docker network inspect paid-drive_default --format '{{json .IPAM.Config}}'
 ```
 
-Identify the immediate connection source in Uvicorn's access log for that
-request; with host Nginx through Docker it may be the Docker bridge gateway.
-Match it to the actual network. Put `127.0.0.1` and that exact trusted address in
-`.env`'s `FORWARDED_ALLOW_IPS`, comma-separated. If it really is loopback only,
-the existing value suffices. Do not copy an arbitrary `172.x` example or use `*`.
+Find the **immediate** connection source for that request in Uvicorn's access log
+— with host nginx through Docker it is often the bridge gateway, not loopback —
+and match it to the network above. Put `127.0.0.1` **and** that exact address in
+`.env`'s `FORWARDED_ALLOW_IPS`, comma-separated; if it really is loopback only,
+the existing value suffices.
 
-The Nginx template replaces `X-Forwarded-For` with its own `$remote_addr`. If you
-use a CDN/CLB in front, first configure real-client IP handling for its documented
-trusted ranges. This guide assumes the documented direct host-Nginx topology.
-Recheck trust after Docker network changes. [Uvicorn proxy settings](https://uvicorn.dev/settings/#http).
+> Never copy an arbitrary `172.x` example, and never use `*`.
 
-## 11. Configure real payments and email
+The template replaces `X-Forwarded-For` with its own `$remote_addr`. Putting a
+CDN/CLB in front later means configuring real-client-IP handling for its
+documented trusted ranges first — this runbook assumes direct host nginx. Recheck
+after any Docker network change.
+[Uvicorn proxy settings](https://uvicorn.dev/settings/#http)
 
-**CVM:** edit `/opt/paiddrive/.env` privately. Keep the runtime path settings and
-use this table to replace the relevant values:
+---
+
+## Step 11 — Configure real payments and email
+
+**CVM** — edit `/opt/paiddrive/.env` privately. Keep the runtime path settings and
+replace these:
 
 | Variable | Production value |
-| --- | --- |
+|----------|------------------|
 | `APP_MODE` | `live` |
 | `APP_URL` | `https://drive.dolphincoder.cn` — origin only, no path |
-| `PAIDDRIVE_PORT` | Your chosen loopback port, normally `8091` |
-| `FORWARDED_ALLOW_IPS` | Actual trusted source from Step 10 |
-| `ZPAY_BASE_URL` | Current merchant's confirmed HTTPS gateway base URL |
-| `ZPAY_PID` | Current merchant ID |
-| **`ZPAY_KEY`** | Current merchant key; PaidDrive does **not** read soccer's `ZPAY_MERCHANT_KEY` name |
-| `MAIL_MODE` | `smtp`, or deliberately `disabled` if using manual support only |
-| `SMTP_HOST`, `SMTP_FROM` | Actual SMTP endpoint and verified sender |
-| `SMTP_USER`, `SMTP_PASSWORD` | Actual SMTP authentication, if required |
-| `SMTP_PORT`, `SMTP_STARTTLS` | Usually `587` + `true`; implicit TLS uses `465` |
+| `PAIDDRIVE_PORT` | your chosen loopback port, normally `8091` |
+| `FORWARDED_ALLOW_IPS` | the actual trusted source from Step 10 |
+| `ZPAY_BASE_URL` | your merchant's confirmed HTTPS gateway base URL |
+| `ZPAY_PID` | your merchant ID |
+| **`ZPAY_KEY`** | your merchant key. PaidDrive does **not** read soccer's `ZPAY_MERCHANT_KEY` name |
+| `MAIL_MODE` | `smtp`, or deliberately `disabled` for manual support only |
+| `SMTP_HOST`, `SMTP_FROM` | actual SMTP endpoint and verified sender |
+| `SMTP_USER`, `SMTP_PASSWORD` | actual SMTP authentication, if required |
+| `SMTP_PORT`, `SMTP_STARTTLS` | usually `587` + `true`; implicit TLS uses `465` |
 | `SUPPORT_QR_PATH` | `/app/content/support/wechat.png` |
 
-The soccer guide documents `https://zpayz.cn` as its gateway. Verify the current
-merchant dashboard/protocol before using that endpoint here. Do not copy
-credential strings from documentation, and do not copy soccer's environment
-file. PaidDrive sends `submit.php` forms and queries `api.php`; validate both
-supported payment channels with your provider.
+> The soccer guide documents `https://zpayz.cn` — verify your current merchant
+> dashboard and protocol before using that endpoint here. Never copy credential
+> strings out of documentation, or soccer's env file. PaidDrive posts `submit.php`
+> forms and queries `api.php`; validate both channels with your provider.
 
-PaidDrive derives these URLs from `APP_URL`:
+PaidDrive derives its callbacks from `APP_URL`:
 
 | Purpose | PaidDrive URL |
-| --- | --- |
+|---------|---------------|
 | Server notification | `https://drive.dolphincoder.cn/api/payments/zpay/notify` |
 | Browser return | `https://drive.dolphincoder.cn/payment/return` |
 
-Add the new domain/callbacks to provider allowlists as required. Preserve soccer's
-existing callback; if the merchant account only allows one global callback,
-resolve that with the provider or use a separate merchant configuration before
+Add the new domain and callbacks to the provider allowlists, **preserving
+soccer's existing callback**. If the account allows only one global callback,
+settle that with the provider or use a separate merchant configuration before
 launch. Browser return parameters alone never grant purchase access.
 
-Live mode requires HTTPS and populated ZPay settings; it rejects file email.
-`MAIL_MODE=disabled` removes email recovery, so only the current buyer browser
-and verified manual support remain. SMTP requires outbound connectivity, not an
-inbound SMTP security-group rule. For Compose passwords containing `$`, follow
-its [single-quoted literal value rules](https://docs.docker.com/compose/how-tos/environment-variables/variable-interpolation/#env-file-syntax)
-in `.env`; never print an expanded configuration containing secrets.
+Live mode requires HTTPS and populated ZPay settings, and rejects file email.
+`MAIL_MODE=disabled` leaves only the buyer's current browser and verified manual
+support. SMTP needs **outbound** connectivity, not an inbound rule. For Compose
+passwords containing `$`, follow its
+[single-quoted literal value rules](https://docs.docker.com/compose/how-tos/environment-variables/variable-interpolation/#env-file-syntax).
 
-Before switching modes, preserve the demo database/content and private config:
+Preserve the demo state and private config, then switch modes:
 
 ```bash
 cd /opt/paiddrive
@@ -628,20 +728,22 @@ PD_BACKUP_STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
   sudo docker compose up -d --force-recreate --wait --wait-timeout 180 paid-drive
   sudo docker compose ps
   sudo docker compose logs --tail=50 paid-drive
-  curl -fsS "http://127.0.0.1:$PD_PORT/health"
+  curl -fsS "http://127.0.0.1:$PD_PORT/health"    # {"status":"ok","mode":"live"}
 )
 ```
 
-Expected: **`{"status":"ok","mode":"live"}`**. This confirms startup and
-database access, not a real payment or SMTP delivery. Demo purchases do not
-become live purchases. Secure production cookies require HTTPS: after this
-switch the HTTP tunnel is suitable for health checks, not buyer-flow testing.
-If startup fails, fix PaidDrive while the public preparation page stays active.
+That confirms startup and database access — not a real payment or SMTP delivery.
+Demo purchases do **not** become live purchases. Production cookies require HTTPS,
+so the tunnel now serves health checks, not buyer-flow testing.
 
-## 12. Enable the HTTPS site and test it
+> If startup fails, fix PaidDrive while the public 503 preparation page stays up.
 
-**CVM:** only after the certificate, real content, support QR and live health
-check are ready:
+---
+
+## Step 12 — Enable the HTTPS site and run acceptance
+
+**CVM** — only once the certificate, real content, support QR and live health
+check are all ready:
 
 ```bash
 (
@@ -653,79 +755,79 @@ check are ready:
 )
 ```
 
-If validation fails, restore `"$PD_AUDIT_DIR/paiddrive-http.conf"` to the
-PaidDrive conf path and run `nginx -t` again. Do not restart the shared proxy or
-replace its global configuration. If HTTPS gives 502 while loopback health works,
-check the PaidDrive Nginx error log and SELinux denials. On an enforcing host,
-an actual `name_connect` denial with `httpd_can_network_connect` off may require
-`sudo setsebool -P httpd_can_network_connect 1`; confirm the denial first because
-this is a host-wide Nginx policy setting. Never turn SELinux off.
+> If validation fails, restore `"$PD_AUDIT_DIR/paiddrive-http.conf"` to the
+> PaidDrive conf path and run `nginx -t` again. Never restart the shared proxy or
+> replace its global configuration.
+
+> **502 while loopback health is fine:** check PaidDrive's nginx error log and
+> actual SELinux denials. A real `name_connect` denial with
+> `httpd_can_network_connect` off needs
+> `sudo setsebool -P httpd_can_network_connect 1` — confirm the denial first,
+> because that is a host-wide nginx policy setting. Never turn SELinux off.
 
 **Mac:**
 
 ```bash
-curl -I http://drive.dolphincoder.cn/
-curl -fsS https://drive.dolphincoder.cn/health
-curl -i https://drive.dolphincoder.cn/api/payments/zpay/notify
-curl -I https://dolphincoder.cn/
-curl -I https://132855.cn/
-curl -I https://soccer.dolphincoder.cn/matches
+curl -I http://drive.dolphincoder.cn/              # 301 → https
+curl -fsS https://drive.dolphincoder.cn/health     # {"status":"ok","mode":"live"}
+curl -i https://drive.dolphincoder.cn/api/payments/zpay/notify   # 400 + fail
+curl -I https://dolphincoder.cn/                   # matches Step 1 baseline
+curl -I https://132855.cn/                         # matches Step 1 baseline
+curl -I https://soccer.dolphincoder.cn/matches      # matches Step 1 baseline
 ```
 
-Expect HTTP→HTTPS redirect, `ok/live`, and **400 with `fail`** for the empty
-notification request. That rejection is correct; do not make the notification
-endpoint return unconditional success. All existing websites must match their
-baseline behavior.
+The `400 fail` for an empty notification is **correct** — never make that endpoint
+return unconditional success. All three existing sites must match their baseline.
 
-Open **https://drive.dolphincoder.cn/c/my-collection** and complete this acceptance
-sequence before sharing the link with buyers:
+Open **https://drive.dolphincoder.cn/c/my-collection** and complete this
+acceptance sequence before giving the link to any buyer:
 
-1. In a fresh browser, verify the first three images are free and the rest locked.
-2. Verify a paid image URL and the collection ZIP are denied in that browser.
-   For the imported example, fresh unauthenticated GETs to
-   `/media/my-collection/v1/004` and `/files/my-collection/v1/download` must return
-   403. Removing a UI blur must not reveal downloaded paid pixels.
-3. Make one controlled small real purchase through an enabled channel. Match
-   the order and amount to the merchant dashboard, not just the return page.
-4. Confirm unlock, single-image download, ZIP, refresh and later revisit. Confirm
-   a different browser still cannot use the first buyer's paid image/ZIP URLs.
-5. With SMTP enabled, verify an address, receive the actual message, and restore
-   access in a second browser. Reusing the same recovery link must fail.
-6. Test WeChat's embedded browser and your target iPhone/Android browsers. A
-   payment may return to a different browser session; use the original session,
-   verified email or support. ZIP downloads are files, not automatic album saves.
-7. Check support QR recognition on the same phone and retention after a PaidDrive
-   container recreation. Confirm external requests from two networks appear as
-   different client IPs, rather than one Docker gateway/rate-limit bucket.
+1. In a fresh browser: the first three images are free, the rest locked.
+2. In that same browser, a paid image URL and the ZIP are denied. For the
+   imported example, fresh unauthenticated GETs of
+   `/media/my-collection/v1/004` and `/files/my-collection/v1/download` must
+   return **403**. Removing a UI blur must not reveal downloaded paid pixels.
+3. One controlled small **real** purchase through an enabled channel. Match the
+   order and amount against the **merchant dashboard**, not the return page.
+4. Confirm unlock, single-image download, ZIP, refresh and a later revisit. Then
+   confirm a different browser still cannot use the first buyer's paid URLs.
+5. With SMTP enabled: verify an address, receive the actual message, restore
+   access in a second browser. Reusing that recovery link must fail.
+6. Test WeChat's embedded browser plus your target iPhone/Android browsers. A
+   payment may return to a different browser session — recover via the original
+   session, verified email, or support. ZIP downloads are files, not automatic
+   album saves.
+7. Check QR recognition on the same phone, and that it survives a container
+   recreation. Confirm requests from two networks appear as **different** client
+   IPs rather than one Docker-gateway rate-limit bucket.
 
-For order inspection, **CVM**:
+Order inspection, **CVM**:
 
 ```bash
 sudo docker compose exec paid-drive python -m app.admin list-orders --limit 20
 ```
 
-If refunding the test purchase, refund through the provider first, then revoke
-its PaidDrive access as in Step 14. The application does not issue refunds.
+> If you refund the test purchase, refund at the provider **first**, then revoke
+> its PaidDrive access (see below). The application does not issue refunds.
 
-## 13. Verify certificate renewal and Nginx reload
+---
 
-**CVM:** inspect existing renewal automation and deploy hooks privately:
+## Step 13 — Verify certificate renewal and the nginx reload hook
+
+**CVM** — inspect the existing renewal automation privately:
 
 ```bash
 sudo certbot certificates
 systemctl list-timers --all
 sudo ls -l /etc/letsencrypt/renewal-hooks/deploy
-command -v nginx
-command -v systemctl
+command -v nginx; command -v systemctl
 sudo certbot renew --cert-name "$PD_DOMAIN" --dry-run
 ```
 
-Reuse the existing scheduler. Check its cron configuration if there is no
-Certbot timer; do not create a duplicate schedule. Webroot certificates need
-Nginx to reload after renewal. Reuse an existing applicable deploy hook if it
-already validates and reloads Nginx. If none covers this certificate, create a
-new scoped hook using the actual paths returned above. This block refuses an
-existing filename and validates the certificate directory and executables:
+Reuse the existing scheduler — check cron if there is no certbot timer, and never
+add a duplicate schedule. Webroot certificates need nginx to reload after renewal:
+reuse a deploy hook that already validates and reloads it, or create a scoped one.
+This block refuses an existing filename and validates the lineage and executables:
 
 ```bash
 sudo python3 - "$PD_DOMAIN" "$(command -v nginx)" "$(command -v systemctl)" <<'PY'
@@ -756,16 +858,19 @@ PY
 sudo certbot renew --cert-name "$PD_DOMAIN" --dry-run --run-deploy-hooks
 ```
 
-If Certbot used another lineage name, adjust it before running the hook-creation
-block. `--run-deploy-hooks` really runs applicable hooks on a successful test,
-so a reload occurs; recheck the existing sites afterward. Keep the ACME location
-on port 80 in the final Nginx configuration. [Certbot renewal behavior](https://eff-certbot.readthedocs.io/en/stable/using.html#renewing-certificates).
+> Adjust the lineage name first if certbot used another. `--run-deploy-hooks`
+> really runs hooks on a successful test, so a real reload happens — recheck the
+> other sites after. Keep the ACME location on port 80 in the final config.
+> [Certbot renewal behavior](https://eff-certbot.readthedocs.io/en/stable/using.html#renewing-certificates)
 
-## 14. Back up and operate the service
+---
 
-**CVM:** backup uses SQLite's consistent backup API and includes the matching
-content tree. Freeze content edits while it runs; the application may continue
-serving buyers. Do not copy only a live SQLite main file while WAL is active.
+## Step 14 — Back up and operate the service
+
+Backup uses SQLite's consistent backup API and includes the matching content
+tree. Freeze content edits while it runs; the app may keep serving buyers.
+
+> Never copy a live SQLite main file alone while WAL is active.
 
 ```bash
 cd /opt/paiddrive
@@ -774,15 +879,15 @@ PD_BACKUP_NAME="paiddrive-$PD_BACKUP_STAMP.tar.gz"
 sudo docker compose exec -T paid-drive python scripts/backup.py \
   --output "/data/backups/$PD_BACKUP_NAME"
 sudo tar -tzf "/var/lib/paiddrive/data/backups/$PD_BACKUP_NAME"
-git rev-parse HEAD
+git rev-parse HEAD                        # keep this SHA with the backup
 ```
 
-Keep that SHA with the backup. `.env`, the Compose override, Nginx configuration
-and certificate management configuration need separate private backup. The
-database archive itself contains customer/session data and must remain private.
+`.env`, the Compose override, the nginx config and the certificate management
+config need **separate** private backup. The archive holds customer and session
+data — keep it private.
 
-Export just the selected archive to the deployment user's private temporary
-directory; this does not change the ownership of the running database:
+Export just the selected archive to a private temp directory (this does not
+change ownership of the running database):
 
 ```bash
 PD_EXPORT_DIR="$(mktemp -d /tmp/paiddrive-export.XXXXXX)"
@@ -793,7 +898,7 @@ sha256sum "$PD_EXPORT_DIR/$PD_BACKUP_NAME"
 printf 'Download this file: %s\n' "$PD_EXPORT_DIR/$PD_BACKUP_NAME"
 ```
 
-**Mac:** replace the source with that exact printed path:
+**Mac** — replace the source with that exact printed path:
 
 ```bash
 PD_CVM='YOUR_EXISTING_SSH_USER@119.45.126.188'
@@ -804,9 +909,9 @@ scp "$PD_CVM:/tmp/paiddrive-export.REPLACE/paiddrive-REPLACE.tar.gz" \
 shasum -a 256 /Users/mewtwo/Workspace/PaidDrive-backups/paiddrive-REPLACE.tar.gz
 ```
 
-Compare hashes, retain a copy outside the CVM, and remove only the temporary
-export when done. Establish a backup frequency appropriate to accepted order
-loss; the source package does not install an automatic offsite backup service.
+Compare the hashes, keep a copy **off** the CVM, remove only the temp export, and
+set a frequency matching the order loss you would accept — the package installs no
+automatic offsite backup.
 
 Routine commands, **CVM**:
 
@@ -817,22 +922,26 @@ sudo docker compose logs --tail=100 paid-drive
 sudo docker compose exec paid-drive python -m app.admin list-orders --limit 20
 ```
 
-After verifying the purchaser against merchant records, use the actual order
-reference with either `python -m app.admin restore --reference ...` or
-`python -m app.admin revoke --reference ...` through `docker compose exec
-paid-drive`. Restore prints a temporary, single-use private link for a confirmed
-paid order; send it only to the verified buyer. Revoke removes access but does
-not refund or erase downloads already obtained. An order number alone is not
-payment proof; never manually change a pending order to paid.
+After verifying the purchaser against merchant records, run
+`python -m app.admin restore --reference ...` or `revoke --reference ...` through
+`docker compose exec paid-drive`. Restore prints a single-use private link for a
+confirmed paid order — send it only to the verified buyer. Revoke removes access
+but refunds nothing and cannot erase downloads already taken.
 
-## 15. Update code and roll back safely
+> An order number alone is not payment proof. Never hand-edit a pending order to
+> paid.
 
-This layout keeps all real content and SQLite outside the checkout. Preserve
-`.env` and `compose.override.yaml`; do not run `git clean -fdx`, delete runtime
-directories, prune shared Docker images, or stop the Docker daemon.
+---
 
-**CVM:** first make and export the Step 14 backup. Then record the current source,
-image and local configuration. `PD_UPDATE_STAMP` identifies this update only:
+## Redeploying after code changes
+
+Real content and SQLite live outside the checkout, so an update touches code and
+the image only. Preserve `.env` and `compose.override.yaml`; never run
+`git clean -fdx`, delete runtime directories, prune shared images, or stop the
+daemon.
+
+Take and export the Step 14 backup first, then record the current source, image
+and private configuration:
 
 ```bash
 cd /opt/paiddrive
@@ -848,16 +957,15 @@ printf '%s\n' "$PD_ROLLBACK_IMAGE" | sudo tee "$PD_UPDATE_DIR/image-tag.txt" >/d
 sudo install -m 0600 .env "$PD_UPDATE_DIR/paiddrive.env"
 sudo install -m 0600 compose.override.yaml "$PD_UPDATE_DIR/compose.override.yaml"
 sudo cp -a /etc/nginx/conf.d/paiddrive.conf "$PD_UPDATE_DIR/paiddrive.conf"
-git status --short
+git status --short                        # resolve local changes, do not discard
 git fetch origin main
 git log --oneline HEAD..origin/main
 git diff --stat HEAD origin/main
 ```
 
-Inspect the changes and their release instructions, especially database or
-configuration changes. There is no general migration/downgrade framework in
-this MVP. Resolve uncommitted code changes instead of discarding them. Choose
-the reviewed full commit SHA, then:
+Review the incoming changes and release notes, especially database or
+configuration ones — **this MVP has no migration/downgrade framework.** Then pin
+the reviewed commit and rebuild:
 
 ```bash
 PD_NEW_SHA='REPLACE_WITH_REVIEWED_FULL_COMMIT_SHA'
@@ -869,9 +977,9 @@ PD_NEW_SHA='REPLACE_WITH_REVIEWED_FULL_COMMIT_SHA'
 )
 ```
 
-Run the new release's tests in an isolated container without production mounts.
-For this release's suite, the following uses only disposable container storage
-and read-only test/template mounts; it does not relabel live data or content:
+Run the new release's tests in an isolated container with **no production
+mounts** — disposable storage plus read-only test/template mounts, so live data is
+never relabelled — then roll it out:
 
 ```bash
 (
@@ -887,14 +995,14 @@ and read-only test/template mounts; it does not relabel live data or content:
 )
 ```
 
-Recheck a pre-existing paid order, anonymous denial, downloads, mail and the
-other sites. A single-worker restart has a brief interruption; this is not a
-zero-downtime release process. New content versions are separate operator
-imports into `/var/lib/paiddrive/content`, preserving old originals.
+Recheck a pre-existing paid order, anonymous denial, downloads, mail and the other
+three sites. A single-worker restart briefly interrupts service — this is not a
+zero-downtime release. New content versions are separate operator imports that
+preserve the old originals.
 
-**Code rollback, only if the database remains compatible:** restore the previous
-code checkout and image without restoring an old order database. If configuration
-changed, compare the saved private files before restoring the applicable values.
+**Code rollback — only while the database stays compatible.** Restore the previous
+checkout and image **without** restoring an old order database. If configuration
+changed, compare the saved private files before restoring any value:
 
 ```bash
 cd /opt/paiddrive
@@ -910,20 +1018,24 @@ cd /opt/paiddrive
 )
 ```
 
-Retagging only the dedicated `paiddrive:local` image leaves the immutable rollback
-tag available. Do not rebuild during rollback. Do not restore an old database
-merely to roll back code: it could erase payments received since that backup.
+> Retagging only the dedicated `paiddrive:local` tag leaves the immutable rollback
+> tag intact. Do not rebuild during a rollback. **Do not restore an old database
+> merely to roll back code** — it could erase payments received since that backup.
 
-## 16. Restore a backup when data recovery is actually necessary
+---
 
-First decide the recovery point and how to reconcile payments since that point.
-Record the current source/image/configuration and preserve the current data even
-if damaged. Pause public sales by restoring the PaidDrive HTTP preparation site;
-if HTTPS was already active, retain its certificate and return 503 in its HTTPS
-`location /` as well, rather than allowing the shared default HTTPS site to
-answer for this hostname. Validate and reload Nginx before stopping PaidDrive.
+## Restoring a backup (only when data recovery is actually necessary)
 
-Then, **CVM**, using only your own trusted backup:
+Decide the recovery point and how to reconcile payments taken since it. Record the
+current source/image/configuration and **preserve the current data even if
+damaged**.
+
+Pause public sales first by restoring PaidDrive's HTTP preparation site. If HTTPS
+is live, keep its certificate and return 503 from its HTTPS `location /` too,
+rather than letting the shared default site answer for this hostname. Validate and
+reload nginx **before** stopping PaidDrive.
+
+Then, using only your own trusted backup:
 
 ```bash
 cd /opt/paiddrive
@@ -938,10 +1050,10 @@ sudo docker run --rm --network none --read-only --user 0:0 --entrypoint python \
   "import sqlite3; c=sqlite3.connect('file:/restore/data/paiddrive.sqlite3?mode=ro', uri=True); r=c.execute('PRAGMA integrity_check').fetchone(); print(r); assert r==('ok',)"
 ```
 
-Check `backup.json`, the recorded source SHA and the matching content tree.
-Stop if integrity is not `ok`. Once you have resolved the recovery-point and
-later-transaction questions, move the current directories aside rather than
-deleting them, restore into new empty directories, and recreate the container:
+Check `backup.json`, the recorded source SHA and the matching content tree. **Stop
+if integrity is not `ok`.** Once the recovery-point and later-transaction questions
+are settled, move the current directories aside rather than deleting them, restore
+into new empty ones, and recreate the container:
 
 ```bash
 PD_RECOVERY_STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
@@ -963,11 +1075,10 @@ PD_RECOVERY_STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 )
 ```
 
-Before starting, select the matching compatible source/image and private `.env`/
-override. The snapshot contains no old WAL/SHM files; do not copy any in from
-the quarantined directory. Preserve any newer sold content versions while
-reconciling later orders. If a support image was backed up separately, restore
-it to the configured private location as well.
+Select the matching source/image and private `.env`/override before starting. The
+snapshot holds no old WAL/SHM files — **do not copy any in** from the quarantined
+directory. Preserve newer sold content versions while reconciling later orders, and
+restore a separately backed-up support image to its configured location.
 
 ```bash
 sudo docker compose up -d --no-build --force-recreate --wait --wait-timeout 180 paid-drive
@@ -975,31 +1086,53 @@ curl -fsS "http://127.0.0.1:$PD_PORT/health"
 sudo docker compose exec paid-drive python -m app.admin list-orders --limit 20
 ```
 
-Validate known orders and content before reopening the final HTTPS proxy. Keep
-the quarantined state and backup until recovery is accepted.
+Validate known orders and content **before** reopening the HTTPS proxy. Keep the
+quarantined state and the backup until recovery is accepted.
 
-## 17. Troubleshooting
+---
 
-| Symptom | Check and action |
-| --- | --- |
-| Private clone denied | Correct repository identity/deploy key; Mac authentication does not authenticate the CVM |
-| GitHub, Docker Hub or PyPI download fails | DNS/outbound reachability and existing trusted network route; keep unrelated services running |
-| Container cannot read originals | UID/GID 10001, directory traversal and SELinux label; check actual runtime `/var/lib/paiddrive/content` |
-| SQLite read-only / permission denied | `/var/lib/paiddrive/data` ownership, mount and disk space; do not chmod it 777 |
-| 503 on the new HTTP site before launch | Expected ACME preparation behavior |
-| ACME fails | Public port 80, A/AAAA, challenge file, Nginx site selection and webroot SELinux label |
-| 502 after launch | Loopback health first, then PaidDrive Nginx logs and actual SELinux network denials |
-| Live startup rejected | HTTPS APP_URL, ZPay base/ID/key, SMTP or disabled email, support image path |
-| Everyone is rate-limited together | Observed Docker proxy source and `FORWARDED_ALLOW_IPS`; verify actual external client IPs |
-| Paid at provider but not unlocked | Order matching, signature/query result, merchant amount and notification reachability; never trust the browser return alone |
-| Email missing | SMTP credentials/TLS, outbound port, verified sender and spam; queueing is not delivery |
-| Purchase missing in another browser | Different session; verified email recovery or manually verified support |
-| Paid image returns 410 | Sold-version bytes/files changed; restore exact originals and create a new version for new content |
-| ZIP/backup fails | Free disk under `/var/lib/paiddrive/data/tmp`, concurrent archive sizes and permissions |
-| New subdomain displays another site | DNS record, duplicate server_name, loaded conf.d file, TLS/SNI and successful reload |
-| Another site regresses | Compare baseline; undo only this deployment's new Nginx/service changes |
+## Troubleshooting
 
-Source and official-reference details are recorded in
+| Symptom | Cause / fix |
+|---------|-------------|
+| Private clone denied | Wrong repository identity or deploy key — your Mac's GitHub login does not authenticate the CVM (Step 3). Soccer's deploy key cannot be reused. |
+| GitHub / Docker Hub / PyPI download fails | DNS or outbound reachability; use the box's established trusted route. Keep unrelated services running; do not reconfigure the shared daemon for a mirror. |
+| Container cannot read originals | UID/GID 10001 ownership, directory traversal bits, or the SELinux label — check the actual runtime `/var/lib/paiddrive/content` (Step 5/9). |
+| SQLite read-only / permission denied | `/var/lib/paiddrive/data` ownership, mount, or disk space. **Do not** `chmod 777` it. |
+| New HTTP site returns 503 before launch | Expected — that is the ACME preparation page (Step 7). |
+| ACME validation fails | Public port 80, the A/AAAA records, the challenge file, nginx site selection, and the webroot's SELinux label (`restorecon -RF /var/www/paiddrive-acme`). |
+| `502` after launch | Check loopback health first, then PaidDrive's nginx logs, then real SELinux denials — `httpd_can_network_connect` is host-wide, so confirm the denial before setting it. |
+| Live startup rejected | HTTPS `APP_URL`, ZPay base/ID/key, SMTP or deliberately disabled mail, support image path (Step 11). |
+| Everyone shares one rate-limit bucket | The observed Docker proxy source is not in `FORWARDED_ALLOW_IPS` — verify real external client IPs from two networks (Step 10). |
+| Paid at the provider but not unlocked | Order matching, signature/query result, merchant amount, notification reachability. Never trust the browser return alone. |
+| Email missing | SMTP credentials/TLS, outbound port, verified sender, spam folder. Queued is not delivered. |
+| Purchase missing in another browser | Different session — use verified email recovery or manually verified support. |
+| Paid image returns `410` | A sold version's bytes/files changed. Restore the exact originals and publish new content as a **new version**. |
+| ZIP or backup fails | Free disk under `/var/lib/paiddrive/data/tmp`, concurrent archive sizes, permissions. |
+| New subdomain shows another site | DNS record, duplicate `server_name`, whether the `conf.d` file actually loaded, TLS/SNI, and whether the reload succeeded. |
+| Another site regressed | Compare against the Step 1 baseline and undo **only** this deployment's new nginx/service changes from `$PD_AUDIT_DIR`. |
+| Shell stuck at `>` after a heredoc | The closing token (`YAML`, `PY`) had leading spaces — it must start at column 0. |
+
+---
+
+## Security checklist
+
+- [ ] **8091 is published on loopback only** and is NOT open in the Tencent Security Group.
+- [ ] The three **existing** nginx vhosts, soccer's systemd unit and the shared Docker daemon config were never edited — only `paiddrive.conf` was added.
+- [ ] Demo mode was **never** reachable through nginx; `APP_MODE=live` before Step 12 opened the site.
+- [ ] `.env` and `compose.override.yaml` are `0600`; no real credential was committed or pasted into a chat.
+- [ ] `ZPAY_KEY` holds PaidDrive's own value — soccer's environment file was not copied, and its callback still works.
+- [ ] `FORWARDED_ALLOW_IPS` lists loopback plus the one **verified** source; never `*`.
+- [ ] `/var/lib/paiddrive/data` is `0700` owned by 10001; content is `0750`/`0640` and mounted `ro,Z`.
+- [ ] SELinux is still **Enforcing**, and only PaidDrive's own directories were relabelled.
+- [ ] Anonymous GETs of a paid media URL and the collection ZIP return **403**; an empty ZPay notification returns **400 `fail`**.
+- [ ] A hash-verified backup exists **off** the CVM with its source SHA recorded — and is stored privately, because it contains customer data.
+- [ ] Certificate renewal was validated with `--dry-run --run-deploy-hooks`, and the other sites were rechecked afterwards.
+- [ ] Every sold content version's files and IDs are intact; no `rsync --delete` has ever run against the content tree.
+
+---
+
+Primary-source details behind these steps are recorded in
 [CVM_DEPLOYMENT_RESEARCH.md](CVM_DEPLOYMENT_RESEARCH.md). Current software
-verification results are in [VALIDATION.md](../VALIDATION.md); deployment,
-real payments, real SMTP and phone acceptance still need the steps above.
+verification results are in [VALIDATION.md](../VALIDATION.md) — deployment, real
+payments, real SMTP and phone acceptance still require the steps above.
