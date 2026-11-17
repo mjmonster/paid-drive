@@ -93,6 +93,9 @@ Internet ─▶ Nginx :80 / :443 ─┬─ dolphincoder.cn        ─▶ uvicorn
 | `$PD_AUDIT_DIR` | this deployment's rollback baseline, `/var/backups/paiddrive-<stamp>` — **record it** |
 | `REPLACE_WITH_*` | a value you must fill in from printed output |
 
+> The repository is **public**: the CVM clones it over plain HTTPS with no
+> credential, key or git configuration (Step 3).
+
 Unless a block is marked **Mac** or **Console**, **commands run on the CVM over
 SSH as a sudo-capable user.** Run one block at a time and stop on an unexpected
 error. The shell variables above live in that SSH session — **re-enter them after
@@ -255,55 +258,32 @@ verifies its digest, and refuses to overwrite an existing plugin
 
 ---
 
-## Step 3 — Deploy key for the private repository
+## Step 3 — Confirm anonymous read access to the repository
 
-Repository: [mjmonster/paid-drive](https://github.com/mjmonster/paid-drive). **Your
-Mac's working GitHub login does not authenticate the CVM.** If the CVM already
-has an identity authorized for *this* repository, verify it and skip the key:
-
-```bash
-git ls-remote git@github.com:mjmonster/paid-drive.git refs/heads/main
-# a commit SHA + refs/heads/main = done; then use PD_GIT_SSH='ssh' in Step 4
-```
-
-> A deploy key is scoped to one repository: soccer's existing deploy key **cannot**
-> be reused here.
-
-Otherwise create a dedicated read-only key as the deployment user:
+[mjmonster/paid-drive](https://github.com/mjmonster/paid-drive) is **public**, so
+the CVM needs no credential, no deploy key and no SSH config to read it. Prove
+that before cloning:
 
 ```bash
-install -d -m 0700 "$HOME/.ssh"
-PD_KEY="$HOME/.ssh/paiddrive_deploy_ed25519"
-(
-  set -eu
-  test ! -e "$PD_KEY"
-  test ! -e "$PD_KEY.pub"
-  ssh-keygen -t ed25519 -C 'paid-drive CVM read-only deploy key' -f "$PD_KEY"
-)
-cat "$PD_KEY.pub"          # copy ONLY this public line
+git ls-remote https://github.com/mjmonster/paid-drive.git refs/heads/main
+# a commit SHA + refs/heads/main = you are done with this step
 ```
 
-Choose a passphrase according to your server's key policy; enter it interactively
-when Git needs it, or load the key into your existing agent. The private file
-stays on the CVM.
+> **If this ever fails** because the repository was made private again, the CVM
+> needs its own read-only **deploy key** — your Mac's GitHub login does not
+> authenticate the CVM, and soccer's deploy key cannot be reused, because a deploy
+> key is scoped to one repository. Generate one with
+> `ssh-keygen -t ed25519 -f ~/.ssh/paiddrive_deploy_ed25519`, add the `.pub` at
+> repository → Settings → Deploy keys with **Allow write access unchecked**
+> ([docs](https://docs.github.com/en/authentication/connecting-to-github-with-ssh/managing-deploy-keys)),
+> then prefix the Step 4 clone with
+> `GIT_SSH_COMMAND='ssh -i ~/.ssh/paiddrive_deploy_ed25519 -o IdentitiesOnly=yes'`
+> and use the `git@github.com:` URL. Compare the offered host-key fingerprint
+> against [GitHub's published fingerprints](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/githubs-ssh-key-fingerprints)
+> on first connection; never disable host-key verification.
 
-**GitHub Console:** repository → Settings → Deploy keys → Add deploy key. Name it
-`Tencent CVM PaidDrive`, paste the public key, and leave **Allow write access
-unchecked**
-([GitHub deploy keys](https://docs.github.com/en/authentication/connecting-to-github-with-ssh/managing-deploy-keys)).
-
-Bind the new key to this repository only — do not replace `~/.ssh/config` or your
-other keys:
-
-```bash
-PD_GIT_SSH="ssh -i $PD_KEY -o IdentitiesOnly=yes"
-GIT_SSH_COMMAND="$PD_GIT_SSH" git ls-remote \
-  git@github.com:mjmonster/paid-drive.git refs/heads/main   # SHA + refs/heads/main
-```
-
-> On first connection, compare the offered host-key fingerprint against
-> [GitHub's published fingerprints](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/githubs-ssh-key-fingerprints)
-> before accepting. Never disable SSH host-key verification.
+> **Pushing** still needs write access — do that from your Mac, never from this
+> shared box. Nothing in this runbook writes to the repository.
 
 ---
 
@@ -319,19 +299,25 @@ first install.
   test ! -e /opt/paiddrive
   test ! -e /var/lib/paiddrive
   sudo install -d -m 0755 -o "$PD_DEPLOY_USER" -g "$PD_DEPLOY_GROUP" /opt/paiddrive
-  GIT_SSH_COMMAND="$PD_GIT_SSH" git clone --branch main \
-    git@github.com:mjmonster/paid-drive.git /opt/paiddrive
+  git clone https://github.com/mjmonster/paid-drive.git /opt/paiddrive
   cd /opt/paiddrive
-  git config core.sshCommand "$PD_GIT_SSH"
-  git checkout --detach d522b124e125e7911ee07bd76186213dfacdc1db
+  git checkout --detach aee21a2493c15012e5b151c8bdf848a941a6d8c1
   git rev-parse HEAD                      # record this SHA
+  test -f .env.example                    # the checkout really landed (Step 5 needs it)
 )
-cd /opt/paiddrive
+cd /opt/paiddrive || echo 'STOP: /opt/paiddrive is missing — the clone did not run'
+ls -la .env.example   # must list the file before you go to Step 5
 ```
 
+> **Check that `ls` actually printed the file.** `sudo install -d` creates
+> `/opt/paiddrive` *before* the clone runs, so a clone that fails for any reason
+> leaves an **empty directory** behind — and you land in it with no error on
+> screen. The `test -f .env.example` above is what catches that; if it fires,
+> `rmdir /opt/paiddrive` (it refuses unless empty) and retry from Step 3.
+
 > **Why detached:** the deployed version is pinned deliberately rather than
-> tracking `main`. That commit is the 47-file initial source release already
-> verified against your Mac — app, Docker configuration, sample images, tests and
+> tracking `main`. That commit is the 48-file source release already verified
+> against your Mac — app, Docker configuration, sample images, tests and
 > deployment helpers. Later updates select another reviewed commit.
 
 Do not run the Mac workspace installer on the CVM.
@@ -1095,7 +1081,8 @@ quarantined state and the backup until recovery is accepted.
 
 | Symptom | Cause / fix |
 |---------|-------------|
-| Private clone denied | Wrong repository identity or deploy key — your Mac's GitHub login does not authenticate the CVM (Step 3). Soccer's deploy key cannot be reused. |
+| `cp: cannot stat '.env.example'` in Step 5 | `/opt/paiddrive` is an **empty** directory — `install -d` created it but the clone failed, and the `cd` still succeeded. Check `ls -la`; if empty, `rmdir /opt/paiddrive` and redo Step 4. |
+| Clone denied | The repository is public, so no credential is needed — check the URL and outbound HTTPS first. If it was made private again, the CVM needs its own deploy key (Step 3 note). |
 | GitHub / Docker Hub / PyPI download fails | DNS or outbound reachability; use the box's established trusted route. Keep unrelated services running; do not reconfigure the shared daemon for a mirror. |
 | Container cannot read originals | UID/GID 10001 ownership, directory traversal bits, or the SELinux label — check the actual runtime `/var/lib/paiddrive/content` (Step 5/9). |
 | SQLite read-only / permission denied | `/var/lib/paiddrive/data` ownership, mount, or disk space. **Do not** `chmod 777` it. |
