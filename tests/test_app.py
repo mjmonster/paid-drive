@@ -714,12 +714,12 @@ class ProductionSettingsTests(unittest.TestCase):
 
 
 class AnalyticsTests(IsolatedProject):
-    """51.la loads in the background; CSP permits its inline loader by hash, never 'unsafe-inline'."""
+    """51.la snippet is on every page; CSP permits its inline init by hash, never 'unsafe-inline'."""
 
-    # 51.la's own async loader, as published by 51.la; it queues the site id in LA.ids.
-    OFFICIAL_SNIPPET = """<script>
-!function(p){"use strict";!function(t){var s=window,e=document,i=p,c="".concat("https:"===e.location.protocol?"https://":"http://","sdk.51.la/js-sdk-pro.min.js"),n=e.createElement("script"),r=e.getElementsByTagName("script")[0];n.type="text/javascript",n.setAttribute("charset","UTF-8"),n.async=!0,n.src=c,n.id="LA_COLLECT",i.d=n;var o=function(){s.LA.ids.push(i)};s.LA?s.LA.ids&&o():(s.LA=p,s.LA.ids=[],o()),r.parentNode.insertBefore(n,r)}()}({id:"JqVcFfP1irXgU1KM",ck:"JqVcFfP1irXgU1KM"});
-</script>"""
+    # 51.la's two-line snippet, chosen by the site owner in 157db05. The SDK tag is
+    # synchronous, so a slow sdk.51.la delays first render: an accepted trade-off.
+    SNIPPET = ('<script charset="UTF-8" id="LA_COLLECT" src="//sdk.51.la/js-sdk-pro.min.js"></script>\n'
+               '<script>LA.init({id:"JqVcFfP1irXgU1KM",ck:"JqVcFfP1irXgU1KM"})</script>')
 
     def setUp(self):
         super().setUp()
@@ -728,16 +728,8 @@ class AnalyticsTests(IsolatedProject):
         csp = self.response.headers["Content-Security-Policy"]
         self.directives = {d.split()[0]: d.split()[1:] for d in csp.split("; ")}
 
-    def test_no_third_party_script_can_block_page_rendering(self):
-        # A parser-blocking third-party <script src> left the storefront blank for
-        # ~129s when sdk.51.la stalled. Only our own assets may load as plain tags.
-        for tag in re.findall(r"<script\b[^>]*\bsrc=[^>]*>", self.response.text):
-            src = re.search(r'src="([^"]+)"', tag).group(1)
-            if not src.startswith("/assets/"):
-                self.assertRegex(tag, r"\b(async|defer)\b", tag)
-
-    def test_storefront_uses_51las_official_async_snippet_verbatim(self):
-        self.assertIn(self.OFFICIAL_SNIPPET, self.response.text)
+    def test_storefront_contains_the_51la_snippet_verbatim(self):
+        self.assertIn(self.SNIPPET, self.response.text)
 
     def test_csp_allows_every_inline_script_on_the_page_by_hash(self):
         import hashlib

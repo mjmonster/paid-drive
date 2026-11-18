@@ -9,7 +9,8 @@
   <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/assets/app.css">
   <script src="/assets/app.js" defer></script>
-  <!-- 51.la official async snippet: loads in the background, never blocks the page -->
+  <!-- 51.la analytics. The SDK tag is synchronous: a slow sdk.51.la delays first render.
+       Editing the inline LA.init line changes its CSP hash in app/main.py (tests will fail). -->
 <script charset="UTF-8" id="LA_COLLECT" src="//sdk.51.la/js-sdk-pro.min.js"></script>
 <script>LA.init({id:"JqVcFfP1irXgU1KM",ck:"JqVcFfP1irXgU1KM"})</script>
 </head>

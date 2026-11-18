@@ -176,7 +176,7 @@ def create_app(settings: Settings | None = None):
         response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
         if settings.app_mode == "live":
             response.headers["Strict-Transport-Security"] = "max-age=31536000"
-        response.headers.setdefault("Content-Security-Policy", "default-src 'self'; script-src 'self' sdk.51.la 'sha256-DqxOVKWrmOA5DRv+5piC2/d118OcghWPyNvbTM1CZWE='; style-src 'self'; img-src 'self' data: *.51.la; font-src 'self'; connect-src 'self' *.51.la; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
+        response.headers.setdefault("Content-Security-Policy", "default-src 'self'; script-src 'self' sdk.51.la 'sha256-JrfMJr3EuvK6osPs6dVYRIv2puYsjuG9Rz0+J3rxRX4='; style-src 'self'; img-src 'self' data: *.51.la; font-src 'self'; connect-src 'self' *.51.la; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
         if not path.startswith("/assets/"):
             response.headers["Cache-Control"] = "private, no-store"
         return response
