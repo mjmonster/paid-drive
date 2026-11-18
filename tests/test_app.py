@@ -716,6 +716,11 @@ class ProductionSettingsTests(unittest.TestCase):
 class AnalyticsTests(IsolatedProject):
     """51.la loads in the background; CSP permits its inline loader by hash, never 'unsafe-inline'."""
 
+    # 51.la's own async loader, as published by 51.la; it queues the site id in LA.ids.
+    OFFICIAL_SNIPPET = """<script>
+!function(p){"use strict";!function(t){var s=window,e=document,i=p,c="".concat("https:"===e.location.protocol?"https://":"http://","sdk.51.la/js-sdk-pro.min.js"),n=e.createElement("script"),r=e.getElementsByTagName("script")[0];n.type="text/javascript",n.setAttribute("charset","UTF-8"),n.async=!0,n.src=c,n.id="LA_COLLECT",i.d=n;var o=function(){s.LA.ids.push(i)};s.LA?s.LA.ids&&o():(s.LA=p,s.LA.ids=[],o()),r.parentNode.insertBefore(n,r)}()}({id:"JqVcFfP1irXgU1KM",ck:"JqVcFfP1irXgU1KM"});
+</script>"""
+
     def setUp(self):
         super().setUp()
         self.start_app()
@@ -731,11 +736,8 @@ class AnalyticsTests(IsolatedProject):
             if not src.startswith("/assets/"):
                 self.assertRegex(tag, r"\b(async|defer)\b", tag)
 
-    def test_51la_still_loads_with_the_site_id_once_its_sdk_arrives(self):
-        html = self.response.text
-        self.assertIn('"//sdk.51.la/js-sdk-pro.min.js"', html)
-        self.assertIn('"LA_COLLECT"', html)
-        self.assertIn('LA.init({id:"JqVcFfP1irXgU1KM",ck:"JqVcFfP1irXgU1KM"})', html)
+    def test_storefront_uses_51las_official_async_snippet_verbatim(self):
+        self.assertIn(self.OFFICIAL_SNIPPET, self.response.text)
 
     def test_csp_allows_every_inline_script_on_the_page_by_hash(self):
         import hashlib
