@@ -2,18 +2,17 @@ import asyncio
 from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timezone
 import hmac
-import html
 import json
 import mimetypes
 from pathlib import Path
 import secrets
 import tempfile
-from urllib.parse import parse_qsl, urlsplit
+from urllib.parse import parse_qsl
 import uuid
 import zipfile
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.background import BackgroundTask
@@ -24,7 +23,7 @@ from .catalog import Catalog
 from .config import BASE_DIR, Settings
 from .db import Database
 from .mail import process_mail_jobs
-from .payments import PaymentError, ZPay, parse_cents
+from .payments import PaymentError, ZPay
 
 STATIC = BASE_DIR / "app/static"
 
@@ -36,7 +35,6 @@ class Payload(BaseModel):
 class OrderRequest(Payload):
     collection_id: str = Field(max_length=80)
     email: str | None = Field(default=None, max_length=254)
-    payment_method: str = "alipay"
 
 
 class EmailRequest(Payload):
@@ -123,6 +121,25 @@ def create_app(settings: Settings | None = None):
             raise HTTPException(404, "当前浏览器找不到这笔订单，请通过邮箱恢复访问，或联系微信客服。")
         return row
 
+    def public_order(order):
+        pay_url = None
+        if order["mode"] == "live" and order["status"] == "pending":
+            collection = catalog.get(order["collection_id"], order["version"])
+            pay_url = gateway.pay_url(order["reference"], order["amount_cents"], collection["title"] if collection else "PaidDrive")
+        return order_payload(order, catalog, pay_url)
+
+    async def settle_if_paid(order):
+        """Ask ZPay about a pending order; settle it if paid. Fail-soft: gateway
+        trouble leaves it pending so the browser simply polls again."""
+        try:
+            status = await gateway.query(order["reference"])
+        except PaymentError:
+            return False
+        if not status.paid:
+            return False
+        fulfil_order(db, settings, order["id"], status.trade_no)
+        return True
+
     def my_purchase(sid, **filters):
         with db.connection() as con:
             row = session_purchase(con, sid, mode=settings.app_mode, **filters)
@@ -157,12 +174,9 @@ def create_app(settings: Settings | None = None):
         response.headers["Referrer-Policy"] = "no-referrer"
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
-        gateway_origin = ""
         if settings.app_mode == "live":
-            gateway_url = urlsplit(settings.zpay_base_url)
-            gateway_origin = " " + gateway_url.scheme + "://" + gateway_url.netloc
             response.headers["Strict-Transport-Security"] = "max-age=31536000"
-        response.headers.setdefault("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'" + gateway_origin)
+        response.headers.setdefault("Content-Security-Policy", "default-src 'self'; script-src 'self' sdk.51.la 'sha256-WDMygNH2sdMNEXmZ1OYhORfZaxr0tPWI3nT9R/FCJU0='; style-src 'self'; img-src 'self' data: *.51.la; font-src 'self'; connect-src 'self' *.51.la; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
         if not path.startswith("/assets/"):
             response.headers["Cache-Control"] = "private, no-store"
         return response
@@ -213,73 +227,75 @@ def create_app(settings: Settings | None = None):
                        "order_reference": purchase["reference"] if purchase else None,
                        "email_hint": email_hint(purchase["verified_email"]) if purchase else None,
                        "email_verified": bool(purchase and purchase["verified_email"])},
-            "latest_order": order_payload(latest, catalog) if latest else None,
+            "latest_order": public_order(latest) if latest else None,
         }
 
     @application.post("/api/orders")
-    def create_order(payload: OrderRequest, request: Request):
+    async def create_order(payload: OrderRequest, request: Request):
+        """Demo: the click that creates the order also pays it.
+        Live: like soccer-match-analyzer's createForMatch: reuse this browser's open
+        order (after asking ZPay whether it is already paid), else mint a new one,
+        and hand back the signed cashier URL."""
         check_csrf(request)
         limit("orders:" + (request.client.host if request.client else "unknown"), 30, 3600)
         collection = catalog.get(payload.collection_id)
         if not collection:
             raise HTTPException(404, "未找到这个合集。")
-        if payload.payment_method not in {"alipay", "wxpay"}:
-            raise HTTPException(422, "请选择微信支付或支付宝。")
         email = normalize_email(payload.email)
         if email and not settings.email_enabled:
             raise HTTPException(503, "邮箱恢复暂不可用。你可以不填邮箱继续购买，需要帮助时联系微信客服。")
-        with db.transaction() as con:
-            if session_purchase(con, request.state.sid, collection_id=collection["id"], version=collection["version"], mode=settings.app_mode):
+        sid = request.state.sid
+        with db.connection() as con:
+            if session_purchase(con, sid, collection_id=collection["id"], version=collection["version"], mode=settings.app_mode):
                 raise HTTPException(409, "当前浏览器已购买这个合集，请刷新页面查看。")
-            existing = con.execute("SELECT * FROM orders WHERE session_id=? AND collection_id=? AND version=? AND amount_cents=? AND payment_method=? AND mode=? AND status='pending' AND created_at>? ORDER BY created_at DESC LIMIT 1", (request.state.sid, collection["id"], collection["version"], collection["price_cents"], payload.payment_method, settings.app_mode, now()-1800)).fetchone()
-            if existing:
-                order_id = existing["id"]
-                con.execute("UPDATE orders SET email=? WHERE id=?", (email, order_id))
-            else:
-                order_id = uuid.uuid4().hex
-                reference = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S") + f"{secrets.randbelow(10**14):014d}"
-                con.execute("INSERT INTO orders(id,reference,session_id,collection_id,version,amount_cents,currency,email,payment_method,mode,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)", (order_id, reference, request.state.sid, collection["id"], collection["version"], collection["price_cents"], "CNY", email, payload.payment_method, settings.app_mode, now()))
-                audit(con, "order_created", reference)
-            order = con.execute("SELECT * FROM orders WHERE id=?", (order_id,)).fetchone()
-        result = order_payload(order, catalog)
-        route = "demo" if settings.app_mode == "demo" else "zpay"
-        result["payment_url"] = f"/checkout/{route}/{order_id}"
-        return result
+            existing = None if settings.app_mode == "demo" else con.execute(
+                "SELECT * FROM orders WHERE session_id=? AND collection_id=? AND version=? AND amount_cents=? AND mode='live' AND status='pending' ORDER BY created_at DESC,rowid DESC LIMIT 1",
+                (sid, collection["id"], collection["version"], collection["price_cents"])).fetchone()
+        if existing:
+            # The buyer may have paid before the notify reached us: settle instead of re-billing.
+            if not await settle_if_paid(existing):
+                with db.transaction() as con:
+                    con.execute("UPDATE orders SET email=? WHERE id=? AND status='pending'", (email, existing["id"]))
+            return public_order(owned_order(existing["id"], sid))
+        order_id = uuid.uuid4().hex
+        reference = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S") + f"{secrets.randbelow(10**14):014d}"
+        method = "demo" if settings.app_mode == "demo" else settings.zpay_pay_type
+        with db.transaction() as con:
+            con.execute("INSERT INTO orders(id,reference,session_id,collection_id,version,amount_cents,currency,email,payment_method,mode,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)", (order_id, reference, sid, collection["id"], collection["version"], collection["price_cents"], "CNY", email, method, settings.app_mode, now()))
+            audit(con, "order_created", reference)
+        if settings.app_mode == "demo":
+            fulfil_order(db, settings, order_id, "demo-" + order_id)
+        return public_order(owned_order(order_id, sid))
 
     @application.get("/api/orders/{order_id}")
     def get_order(order_id: str, request: Request):
-        return order_payload(owned_order(order_id, request.state.sid), catalog)
-
-    @application.post("/api/demo/orders/{order_id}/pay")
-    def demo_pay(order_id: str, request: Request):
-        if settings.app_mode != "demo":
-            raise HTTPException(404, "未找到此页面。")
-        check_csrf(request)
-        order = owned_order(order_id, request.state.sid)
-        if order["mode"] != "demo":
-            raise HTTPException(404, "未找到此页面。")
-        fulfil_order(db, settings, order_id, "demo-" + order_id)
-        return order_payload(owned_order(order_id, request.state.sid), catalog)
+        return public_order(owned_order(order_id, request.state.sid))
 
     @application.post("/api/orders/{order_id}/refresh")
     async def refresh_order(order_id: str, request: Request):
+        """Poll path, like soccer-match-analyzer's PaymentService.verify.
+
+        Runs in parallel with the notify path; whichever sees payment first settles
+        the order and the other finds it already paid.
+        """
         check_csrf(request)
         limit("refresh:" + request.state.sid, 40, 60)
         order = owned_order(order_id, request.state.sid)
         if order["status"] == "pending" and order["mode"] == "live":
-            try:
-                result = await application.state.gateway.query(order)
-                if application.state.gateway.validate_query(order, result):
-                    fulfil_order(db, settings, order["id"], str(result["trade_no"]))
-            except PaymentError as exc:
-                raise HTTPException(502, str(exc)) from None
-        return order_payload(owned_order(order_id, request.state.sid), catalog)
+            await settle_if_paid(order)
+        return public_order(owned_order(order_id, request.state.sid))
 
-    @application.api_route("/api/payments/zpay/notify", methods=["GET", "POST"])
-    async def payment_notification(request: Request):
+    @application.get("/api/payments/zpay/notify")
+    def payment_notification(request: Request):
+        """ZPay async notify, settled like soccer-match-analyzer's handleZPayCallback.
+
+        Trusted only after the MD5 signature verifies AND the money equals our order.
+        Reply ``success`` for anything genuine (including duplicates and non-success
+        statuses) so ZPay stops retrying; ``fail`` makes ZPay retry later.
+        """
         if settings.app_mode != "live":
             return PlainTextResponse("fail", status_code=404)
-        raw = request.url.query if request.method == "GET" else (await request.body()).decode("utf-8", errors="replace")
+        raw = request.url.query
         if len(raw) > 8192:
             return PlainTextResponse("fail", status_code=400)
         try:
@@ -288,26 +304,25 @@ def create_app(settings: Settings | None = None):
             return PlainTextResponse("fail", status_code=400)
         if len({key for key, value in pairs}) != len(pairs):
             return PlainTextResponse("fail", status_code=400)
-        values = dict(pairs)
-        try:
-            application.state.gateway.verify_notification(values)
-            with db.connection() as con:
-                order = con.execute("SELECT * FROM orders WHERE reference=? AND mode='live'", (values.get("out_trade_no"),)).fetchone()
-            if not order:
-                return PlainTextResponse("fail", status_code=400)
-            if parse_cents(values.get("money")) != order["amount_cents"]:
-                return PlainTextResponse("fail", status_code=400)
-            if order["status"] == "paid":
-                if str(values.get("trade_no")) != order["provider_trade_no"]:
-                    return PlainTextResponse("fail", status_code=400)
-                return PlainTextResponse("success")
-            result = await application.state.gateway.query(order)
-            if not application.state.gateway.validate_query(order, result, notification=values):
-                return PlainTextResponse("fail", status_code=503)
-            fulfil_order(db, settings, order["id"], str(result["trade_no"]))
-            return PlainTextResponse("success")
-        except PaymentError:
+        notice = gateway.parse_notify(dict(pairs))
+        if not notice.valid:
             return PlainTextResponse("fail", status_code=400)
+        if not notice.success:
+            return PlainTextResponse("success")
+        with db.connection() as con:
+            order = con.execute("SELECT * FROM orders WHERE reference=? AND mode='live'", (notice.reference,)).fetchone()
+        if not order:
+            return PlainTextResponse("fail", status_code=400)
+        if order["status"] == "paid":
+            return PlainTextResponse("success")
+        if notice.cents is None or notice.cents != order["amount_cents"]:
+            return PlainTextResponse("fail", status_code=400)
+        try:
+            fulfil_order(db, settings, order["id"], notice.trade_no)
+        except HTTPException:
+            # e.g. this gateway trade number already paid for another order
+            return PlainTextResponse("fail", status_code=409)
+        return PlainTextResponse("success")
 
     @application.post("/api/email/attach")
     def attach_email(payload: AttachRequest, request: Request):
@@ -422,18 +437,6 @@ def create_app(settings: Settings | None = None):
         return FileResponse(path, filename=path.name if download else None,
                             headers={"Content-Security-Policy": "sandbox; default-src 'none'; style-src 'unsafe-inline'"})
 
-    @application.get("/checkout/zpay/{order_id}")
-    def zpay_checkout(order_id: str, request: Request):
-        if settings.app_mode != "live":
-            raise HTTPException(404, "未找到此页面。")
-        order = owned_order(order_id, request.state.sid)
-        if order["status"] != "pending":
-            raise HTTPException(409, "这笔订单已支付，请返回合集查看。")
-        collection = catalog.get(order["collection_id"], order["version"])
-        values = application.state.gateway.checkout_params(order, collection)
-        inputs = "".join(f'<input type="hidden" name="{html.escape(k, quote=True)}" value="{html.escape(str(v), quote=True)}">' for k, v in values.items())
-        return HTMLResponse('<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>正在打开支付页面 · PaidDrive</title><link rel="stylesheet" href="/assets/app.css"><body><main class="payment-forward"><h1>正在打开支付页面…</h1><p>付款确认后，合集将自动解锁。</p><form id="zpay-forward" method="post" action="' + html.escape(application.state.gateway.submit_url, quote=True) + '">' + inputs + '<button type="submit">前往支付</button></form><script src="/assets/pay-submit.js" defer></script></main></body></html>')
-
     @application.get("/favicon.ico", include_in_schema=False)
     def favicon():
         return PlainTextResponse("", status_code=204)
@@ -443,7 +446,6 @@ def create_app(settings: Settings | None = None):
     @application.get("/payment/return")
     @application.get("/recover")
     @application.get("/verify-email")
-    @application.get("/checkout/demo/{order_id}")
     def page():
         return FileResponse(STATIC / "index.html", media_type="text/html")
 

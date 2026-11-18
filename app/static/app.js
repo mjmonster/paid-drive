@@ -33,11 +33,6 @@
     if (!match) return null;
     try { return decodeURIComponent(match[1]); } catch { return null; }
   }
-  function routeOrderId() {
-    const match = location.pathname.match(/^\/checkout\/demo\/([^/]+)\/?$/);
-    if (!match) return null;
-    try { return decodeURIComponent(match[1]); } catch { return null; }
-  }
   function safeLocalUrl(value) {
     if (!value) return '';
     try {
@@ -101,9 +96,6 @@
       // The backend resolves this only against session-owned orders. It is a
       // collection selector, never evidence that payment succeeded.
       if (returnReference) query.set('order_reference',returnReference);
-    } else {
-      const orderId = routeOrderId();
-      if (orderId) query.set('order_id',orderId);
     }
     const queryString = query.toString();
     let data;
@@ -152,7 +144,7 @@
           <h1 id="collectionTitle">${esc(c.title)}</h1>
           <div class="product-meta"><span class="preview-chip">${a.unlocked ? icons.check + ' 整套已解锁' : esc(c.preview_count) + ' 张免费预览'}</span><span>共 ${esc(c.total_count)} 张</span><span class="meta-divider"></span><span>一次购买</span></div>
         </section>
-        ${pending && !a.unlocked ? `<div class="pending-strip" role="status"><span>有一笔订单等待确认</span><button class="text-button" data-action="pending" type="button">${pending.mode === 'demo' ? '继续演示' : '查询付款'} ↗</button></div>` : ''}
+        ${pending && !a.unlocked ? `<div class="pending-strip" role="status"><span>有一笔订单等待确认</span><button class="text-button" data-action="pending" type="button">查询付款 ↗</button></div>` : ''}
         <section class="deck-gallery" id="gallery" tabindex="0" role="region" aria-roledescription="轮播图" aria-label="合集图片，可左右滑动，或使用方向键切换">
           <div class="collection-deck" id="deckStage"><div class="deck-back back-two" aria-hidden="true"></div><div class="deck-back back-one" aria-hidden="true"></div><div id="deckCardHost"></div></div>
           <div class="deck-controls"><button class="deck-arrow" id="deckPrevious" data-action="prev-deck" type="button" aria-label="上一张图片">${icons.left}</button><div class="deck-position"><p id="deckCounter" aria-live="polite" aria-atomic="true"></p><span id="deckHint">左右滑动，翻看下一张</span></div><button class="deck-arrow" id="deckNext" data-action="next-deck" type="button" aria-label="下一张图片">${icons.right}</button></div>
@@ -310,29 +302,22 @@
     const {collection:c,site} = state.data;
     openModal('checkout', shell({eyebrow:'确认购买',title:'解锁这套图片。',body:`
       <div class="checkout-summary"><div><strong>${esc(c.title)}</strong><small>共 ${esc(c.total_count)} 张图片 · 一次购买</small></div><span class="summary-price">${esc(price())}</span></div>
-      ${site.mode === 'demo' ? '<div class="demo-note">演示模式 · 不会真实扣款。下一步可模拟付款，体验解锁流程。</div>' : ''}
       <form data-form="checkout">
-        <fieldset class="payment-fieldset"><legend class="field-label payment-legend">付款方式</legend><div class="payment-options"><label class="payment-choice"><input type="radio" name="payment_method" value="wxpay" checked><span class="pay-icon">微</span>微信支付</label><label class="payment-choice"><input type="radio" name="payment_method" value="alipay"><span class="pay-icon alipay">支</span>支付宝</label></div></fieldset>
         <label class="field-label" for="checkoutEmail">找回邮箱 <span class="optional">（选填）</span></label>
         <input class="text-input" id="checkoutEmail" name="email" type="email" autocomplete="email" maxlength="254" placeholder="you@example.com" ${site.email_enabled ? '' : 'disabled'} value="${esc(state.checkoutEmail)}">
         <p class="field-help">${site.email_enabled ? (site.mail_mode === 'file' ? '可不填写。本地演示不会发送邮件，付款后的验证链接会保存在本地邮件目录。' : '付款后验证邮箱，即可在其他设备恢复访问。无需注册，也无需密码。') : '邮箱找回暂未开放。请保存订单号，丢失访问时可联系微信客服。'}</p>
         <div class="checkout-total"><span>合计 · 一次付款</span><strong>${esc(price())}</strong></div>
-        <button class="primary-button" type="submit">${site.mode === 'demo' ? '继续演示付款' : '支付 ' + esc(price())} ${icons.arrow}</button>
-        <p class="modal-footnote">${site.mode === 'demo' ? '仅体验购买流程，不会真实扣款。' : '将跳转至 ZPay 完成付款。'}</p>
+        <button class="primary-button" type="submit">支付 ${esc(price())} ${icons.arrow}</button>
+        <p class="modal-footnote">将在新页面打开付款，付款完成后本页自动解锁。</p>
       </form>`}));
   }
 
-  function showDemoCheckout(order) {
-    if (state.data.site.mode !== 'demo' || order.mode !== 'demo') { showPending(); return; }
-    state.latestOrder = order;
-    openModal('demo',shell({eyebrow:'演示付款',title:'体验解锁流程。',lead:'模拟付款成功后，即可查看整套示例图片。不会真实扣款。',body:`<div class="checkout-summary"><div><strong>${esc(state.data.collection.title)}</strong><small>演示订单 · ${esc(order.reference)}</small></div><span class="summary-price">${esc(price())}</span></div><div class="demo-note">演示模式 · 不会真实扣款。此操作仅模拟成功付款，不会发起 ZPay 交易。</div><div class="modal-actions"><button class="primary-button" data-action="demo-pay" type="button">模拟付款成功 ${icons.arrow}</button><button class="secondary-button" data-action="close" type="button">稍后再说</button></div>`}));
-  }
   function showPending() {
     const order = pendingOrder();
     if (!order) { showCheckout(); return; }
-    if (order.mode === 'demo' && state.data.site.mode === 'demo') { showDemoCheckout(order); return; }
-    openModal('pending',shell({eyebrow:'付款状态',title:'正在等待付款确认。',lead:'如果你已完成付款，可以查询付款结果，无需重复支付。',body:`<div class="receipt-row"><div><span class="receipt-label">订单号</span><span class="order-reference">${esc(order.reference)}</span></div><button type="button" data-action="copy-order" aria-label="复制订单号">${icons.copy}</button></div><div class="modal-actions"><button class="primary-button" data-action="check-payment" type="button">查询付款结果 ${icons.arrow}</button>${order.payment_url ? '<button class="secondary-button" data-action="continue-payment" type="button">继续前往付款</button>' : ''}<button class="secondary-button" data-action="support" type="button">联系微信客服</button></div>`}));
+    openModal('pending',shell({eyebrow:'付款状态',title:'正在等待付款确认。',lead:'在新打开的页面完成付款后，本页会自动解锁，无需重复支付。',body:`<div class="receipt-row"><div><span class="receipt-label">订单号</span><span class="order-reference">${esc(order.reference)}</span></div><button type="button" data-action="copy-order" aria-label="复制订单号">${icons.copy}</button></div><div class="form-message" role="status">正在等待付款结果…</div><div class="modal-actions"><button class="primary-button" data-action="check-payment" type="button">我已完成付款，刷新状态 ${icons.arrow}</button>${order.pay_url ? '<button class="secondary-button" data-action="continue-payment" type="button">重新打开付款页面</button>' : ''}<button class="secondary-button" data-action="support" type="button">联系微信客服</button></div>`}));
   }
+
   function showSuccess() {
     const {collection:c,access:a,site} = state.data;
     const download = safeLocalUrl(c.download_url);
@@ -388,33 +373,74 @@
     openModal('redeem',shell({eyebrow:verify ? '验证邮箱' : '恢复访问',title:verify ? '确认你的邮箱。' : '欢迎回来。',lead:verify ? '确认邮箱后，即可启用找回功能，并在当前浏览器打开已购合集。' : '使用这条找回链接，在当前浏览器重新打开已购合集。',body:state.recoveryToken ? `<p class="field-help">这条临时链接仅能使用一次。请确认这是你本人申请的链接。</p><div class="modal-actions"><button class="primary-button" type="button" data-action="redeem">${verify ? '验证邮箱并打开合集' : '恢复访问'} ${icons.arrow}</button></div>` : `<div class="form-message form-error" role="alert">链接不完整，请重新申请找回链接，或联系微信客服。</div><div class="modal-actions"><button class="primary-button" type="button" data-action="restore">重新申请链接 ${icons.arrow}</button></div>`}));
   }
 
-  async function refreshPayment({silent=false} = {}) {
-    const order = state.latestOrder;
-    if (!order) return false;
-    const updated = await request('/api/orders/' + encodeURIComponent(order.id) + '/refresh',{method:'POST'});
+  async function unlockDemo(button) {
+    setBusy(true,button,'正在解锁…');
+    try {
+      state.latestOrder = await request('/api/orders',{method:'POST',body:{collection_id:state.data.collection.id}});
+      await loadCollection({quiet:true});
+      setBusy(false,button);
+      showSuccess();
+    } catch(error) { setBusy(false,button); showToast(error.message,true); }
+  }
+
+  function cashierUrl(order) {
+    const url = new URL(order?.pay_url || '',location.origin);
+    if (url.protocol !== 'https:') throw new Error('付款地址暂不可用，请联系微信客服。');
+    return url.href;
+  }
+  // `win` must be opened synchronously inside the click: after an await the browser
+  // treats window.open as a popup and blocks it.
+  function openCashier(order, win) {
+    let url;
+    try { url = cashierUrl(order); } catch(error) { win?.close(); throw error; }
+    if (win && !win.closed) { win.opener = null; win.location.href = url; return; }
+    location.assign(url); // popup blocked (common in in-app browsers): the parked order is re-checked on return
+  }
+
+  // Parked from hand-off to the gateway until the order settles. On mobile the
+  // cashier can freeze or discard this tab, so the poll loop may never see "paid";
+  // the parked id is re-checked whenever the page comes back to the foreground.
+  const PARKED_KEY = 'paiddrive.pendingOrder';
+  function parkOrder(id) { try { sessionStorage.setItem(PARKED_KEY,id); } catch { /* storage unavailable */ } }
+  function unparkOrder() { try { sessionStorage.removeItem(PARKED_KEY); } catch { /* storage unavailable */ } }
+  function parkedOrder() { try { return sessionStorage.getItem(PARKED_KEY); } catch { return null; } }
+
+  async function refreshPayment({silent=false, orderId=state.latestOrder?.id} = {}) {
+    if (!orderId) return false;
+    const updated = await request('/api/orders/' + encodeURIComponent(orderId) + '/refresh',{method:'POST'});
     state.latestOrder = updated;
     if (updated.collection_slug) state.slug = updated.collection_slug;
     if (updated.status === 'paid') {
-      clearTimeout(state.pollTimer);
+      stopPolling();
+      unparkOrder();
       await loadCollection({quiet:true});
       if (state.data.access.unlocked) {
         if (!state.busy) showSuccess();
         return true;
       }
-    } else {
-      await loadCollection({quiet:true});
-      if (!silent) showToast('付款尚未确认，请稍后再次查询。');
+    } else if (!silent) {
+      showToast('付款尚未确认，请稍后再次查询。');
     }
     return false;
   }
-  async function pollPayment() {
-    if (!pendingOrder() || state.pollCount >= 6) return;
-    state.pollCount += 1;
-    try {
-      const paid = await refreshPayment({silent:true});
-      if (paid) return;
-    } catch { /* Leave the pending order visible and offer a manual recheck. */ }
-    if (pendingOrder() && state.pollCount < 6) state.pollTimer = setTimeout(pollPayment,6000);
+  function stopPolling() { clearTimeout(state.pollTimer); state.pollTimer = null; }
+  function startPolling() {
+    stopPolling();
+    state.pollCount = 0;
+    const tick = async () => {
+      state.pollCount += 1;
+      try { if (await refreshPayment({silent:true})) return; } catch { /* transient: keep polling */ }
+      if (!pendingOrder()) return;
+      if (state.pollCount < 40) state.pollTimer = setTimeout(tick,3000);
+      else if (modal.open) formMessage('仍未收到付款结果。付款完成后，请点击下方按钮刷新。');
+    };
+    state.pollTimer = setTimeout(tick,3000);
+  }
+  async function recheckParked() {
+    const id = parkedOrder();
+    if (!id || !state.data || state.busy) return;
+    try { await refreshPayment({silent:true,orderId:id}); }
+    catch(error) { if (error.status === 404) unparkOrder(); }
   }
 
   async function copyOrder() {
@@ -444,7 +470,10 @@
     if (performance.now() < state.suppressClickUntil && button.closest('#gallery')) { event.preventDefault(); return; }
     if (state.busy && !['copy-order'].includes(action)) return;
     if (action === 'close') closeModal();
-    else if (action === 'purchase') showCheckout();
+    else if (action === 'purchase') {
+      if (state.data?.site.mode === 'demo' && !state.data.access.unlocked) await unlockDemo(button);
+      else showCheckout();
+    }
     else if (action === 'restore') showRestore();
     else if (action === 'attach') showAttach();
     else if (action === 'support') showSupport();
@@ -458,29 +487,13 @@
     else if (action === 'prev-deck') goToDeck(state.deckIndex-1);
     else if (action === 'next-deck') goToDeck(state.deckIndex+1);
     else if (action === 'retry') { try { await loadCollection(); } catch(error) { showToast(error.message,true); } }
-    else if (action === 'demo-pay') {
-      const order = state.latestOrder;
-      if (!order || state.data.site.mode !== 'demo' || order.mode !== 'demo') return;
-      setBusy(true,button,'正在模拟付款…');
-      try {
-        await request('/api/demo/orders/' + encodeURIComponent(order.id) + '/pay',{method:'POST'});
-        await loadCollection({quiet:true});
-        setBusy(false,button);
-        if (state.data.access.unlocked) showSuccess();
-        else formMessage('付款记录已保存，请刷新页面查看解锁结果。');
-      } catch(error) { setBusy(false,button); formMessage(error.message,true); }
-    } else if (action === 'check-payment') {
+    else if (action === 'check-payment') {
       setBusy(true,button,'正在查询付款…');
       try { const paid = await refreshPayment(); setBusy(false,button); if (paid) showSuccess(); }
       catch(error) { setBusy(false,button); formMessage(error.message,true); }
     } else if (action === 'continue-payment') {
-      try {
-        const order = state.latestOrder;
-        if (!order?.payment_url || order.mode !== 'live') return;
-        const url = new URL(order.payment_url,location.origin);
-        if (url.protocol !== 'https:') throw new Error('付款地址暂不可用，请联系微信客服。');
-        location.assign(url.href);
-      } catch(error) { formMessage(error.message,true); }
+      try { openCashier(state.latestOrder, window.open('','_blank')); }
+      catch(error) { formMessage(error.message,true); }
     } else if (action === 'redeem') {
       if (!state.recoveryToken) return;
       setBusy(true,button,'正在打开合集…');
@@ -509,16 +522,20 @@
     try {
       if (kind === 'checkout') {
         state.checkoutEmail = email;
-        const body = {collection_id:state.data.collection.id,payment_method:String(values.get('payment_method') || 'wxpay')};
+        const payWindow = window.open('','_blank'); // claim the tab while the click still counts as user activation
+        const body = {collection_id:state.data.collection.id};
         if (email) body.email = email;
-        const order = await request('/api/orders',{method:'POST',body});
+        let order;
+        try { order = await request('/api/orders',{method:'POST',body}); }
+        catch(error) { payWindow?.close(); throw error; }
         state.latestOrder = order;
         setBusy(false,button); render();
-        if (order.mode === 'demo') showDemoCheckout(order);
+        if (order.status === 'paid') { payWindow?.close(); unparkOrder(); await loadCollection({quiet:true}); showSuccess(); }
         else {
-          const url = new URL(order.payment_url,location.origin);
-          if (url.protocol !== 'https:') throw new Error('付款地址暂不可用，请联系微信客服。');
-          window.location.assign(url.href);
+          parkOrder(order.id);
+          openCashier(order,payWindow);
+          showPending();
+          startPolling();
         }
       } else if (kind === 'restore') {
         const result = await request('/api/access/request',{method:'POST',body:{email}});
@@ -626,7 +643,9 @@
   });
   window.addEventListener('pageshow',event => {
     if (event.persisted && state.data) loadCollection({quiet:true}).catch(() => showToast('请刷新页面查看购买状态。',true));
+    recheckParked();
   });
+  document.addEventListener('visibilitychange',() => { if (document.visibilityState === 'visible') recheckParked(); });
 
   async function init() {
     if (/^\/(recover|verify-email)\/?$/.test(location.pathname)) {
@@ -638,16 +657,9 @@
       await loadCollection();
       if (state.returnRecovery) return;
       if (state.recoveryPurpose) showRedeem();
-      else if (location.pathname.startsWith('/checkout/demo/')) {
-        const id = routeOrderId();
-        if (!id) throw new Error('付款链接不完整，请打开合集后继续。');
-        const order = await request('/api/orders/' + encodeURIComponent(id));
-        state.latestOrder = order;
-        if (order.status === 'paid') showSuccess();
-        else showDemoCheckout(order);
-      } else if (location.pathname === '/payment/return') {
+      else if (location.pathname === '/payment/return') {
         history.replaceState(null,'','/c/' + encodeURIComponent(state.slug));
-        if (pendingOrder()) { showPending(); await pollPayment(); }
+        if (pendingOrder()) { showPending(); startPolling(); }
         else if (state.data.access.unlocked) showSuccess();
       }
     } catch(error) {

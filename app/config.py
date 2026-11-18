@@ -24,6 +24,7 @@ class Settings:
     zpay_base_url: str = ""
     zpay_pid: str = ""
     zpay_key: str = ""
+    zpay_pay_type: str = "wxpay"
     session_days: int = 90
     support_qr_path: Path | None = None
     run_background_jobs: bool = True
@@ -47,6 +48,7 @@ class Settings:
             zpay_base_url=os.getenv("ZPAY_BASE_URL", "").rstrip("/"),
             zpay_pid=os.getenv("ZPAY_PID", ""),
             zpay_key=os.getenv("ZPAY_KEY", ""),
+            zpay_pay_type=os.getenv("ZPAY_PAY_TYPE", "wxpay").lower(),
             session_days=int(os.getenv("SESSION_DAYS", "90")),
             support_qr_path=Path(os.environ["SUPPORT_QR_PATH"]) if os.getenv("SUPPORT_QR_PATH") else None,
         )
@@ -69,6 +71,8 @@ class Settings:
                 raise ValueError("Live mode requires your ZPAY_BASE_URL with HTTPS")
             if not self.zpay_pid or not self.zpay_key:
                 raise ValueError("Live mode requires ZPAY_PID and ZPAY_KEY")
+            if self.zpay_pay_type not in {"alipay", "wxpay"}:
+                raise ValueError("ZPAY_PAY_TYPE must be wxpay or alipay")
             if self.mail_mode == "file":
                 raise ValueError("File email is demo-only; use SMTP or disable email in live mode")
         if self.mail_mode == "smtp":

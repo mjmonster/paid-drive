@@ -678,8 +678,9 @@ replace these:
 
 > The soccer guide documents `https://zpayz.cn` — verify your current merchant
 > dashboard and protocol before using that endpoint here. Never copy credential
-> strings out of documentation, or soccer's env file. PaidDrive posts `submit.php`
-> forms and queries `api.php`; validate both channels with your provider.
+> strings out of documentation, or soccer's env file. Like soccer, PaidDrive opens a
+> signed `submit.php` GET URL, accepts the GET notify, and polls `api.php?act=order`;
+> set `ZPAY_PAY_TYPE` (`wxpay`/`alipay`) to match the channel soccer uses.
 
 PaidDrive derives its callbacks from `APP_URL`:
 

@@ -147,6 +147,7 @@ ssh -L 8091:127.0.0.1:8091 your-user@your-cvm-host
 | `APP_URL` | 实际 HTTPS 站点源地址，例如 `https://drive.example.com`；不要包含路径或查询参数。 |
 | `ZPAY_BASE_URL` | 现有 ZPay 接入实际使用的 HTTPS API 基础地址；代码会追加 `submit.php` 和 `api.php`，不要填写商户后台或完整接口路径。 |
 | `ZPAY_PID`、`ZPAY_KEY` | 商户 ID 和商户密钥。 |
+| `ZPAY_PAY_TYPE` | `wxpay`（微信支付，默认）或 `alipay`（支付宝）。买家不再选择付款方式，由此项决定收银台。 |
 | `MAIL_MODE` | `smtp` 开启邮件恢复；`disabled` 关闭邮箱收集和邮件恢复。 |
 | `SMTP_HOST`、`SMTP_PORT`、`SMTP_FROM` | 邮件服务配置。 |
 | `SMTP_USER`、`SMTP_PASSWORD` | 邮件服务需要的认证信息。 |
@@ -160,7 +161,7 @@ ZPay 接入地址如下：
 - 服务端通知：`https://your-domain/api/payments/zpay/notify`
 - 浏览器回跳：`https://your-domain/payment/return`
 
-支付确认由后端完成，检查通知签名、订单、商户、金额和支付平台查询结果。浏览器回跳参数本身不能授予访问权限。重复通知不能重复发放购买权限。
+支付确认由后端完成（与 soccer-match-analyzer 相同）：异步通知须通过 MD5 签名校验且金额与订单一致才会解锁；浏览器同时每 3 秒向 `api.php?act=order` 查询，两条路径谁先确认谁解锁，另一条自动忽略。支付平台暂时无法连接时订单保持待付款，不会报错。浏览器回跳参数本身不能授予访问权限。重复通知不能重复发放购买权限。
 
 提供两个分阶段的宿主机 Nginx 模板：`deploy/nginx.http.conf.example` 只服务 ACME 验证和准备中页面；`deploy/nginx.conf.example` 在证书已存在后提供正式 HTTPS 反向代理。使用 `scripts/render_deploy_config.py` 替换实际子域名和端口；脚本仅生成新文件，不修改 DNS、不申请证书、不覆盖现有配置。先申请证书、配置正式模式和真实客服二维码，再开放正式代理，具体顺序见详细手册。
 

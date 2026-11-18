@@ -15,11 +15,12 @@ import re
 import sqlite3
 import tempfile
 import unittest
-from unittest.mock import AsyncMock, patch
-from urllib.parse import parse_qs, urlsplit
+from unittest.mock import patch
+from urllib.parse import parse_qs, parse_qsl, urlsplit
 import zipfile
 
 from fastapi.testclient import TestClient
+import httpx
 
 from app.catalog import Catalog
 from app.config import Settings
@@ -111,7 +112,7 @@ class IsolatedProject(unittest.TestCase):
         })
 
     def create_order(self, collection_id="alpha", email=None, client=None):
-        payload = {"collection_id": collection_id, "payment_method": "alipay"}
+        payload = {"collection_id": collection_id}
         if email is not None:
             payload["email"] = email
         response = self.post("/api/orders", payload, client)
@@ -120,8 +121,7 @@ class IsolatedProject(unittest.TestCase):
 
     def buy_demo(self, collection_id="alpha", email=None, client=None):
         order = self.create_order(collection_id, email, client)
-        result = self.post(f"/api/demo/orders/{order['id']}/pay", client=client)
-        self.assertEqual(result.status_code, 200, result.text)
+        self.assertEqual(order["status"], "paid")
         return order
 
     def latest_mail_token(self, email):
@@ -184,6 +184,14 @@ class GuestPurchaseTests(IsolatedProject):
         super().setUp()
         self.start_app()
 
+    def test_demo_purchase_unlocks_in_one_call_without_choosing_a_payment_method(self):
+        response = self.post("/api/orders", {"collection_id": "alpha"})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["status"], "paid")
+        self.assertIsNone(response.json()["pay_url"])
+        self.assertTrue(self.bootstrap()["access"]["unlocked"])
+        self.assertEqual(self.client.get("/media/alpha/v1/image-5").status_code, 200)
+
     def test_bootstrap_without_slug_selects_the_first_configured_collection(self):
         response = self.client.get("/api/bootstrap")
         self.assertEqual(response.status_code, 200, response.text)
@@ -191,24 +199,6 @@ class GuestPurchaseTests(IsolatedProject):
         self.assertEqual(body["collection"]["id"], "alpha")
         self.assertEqual(body["collection"]["slug"], "alpha-collection")
         self.assertFalse(body["access"]["unlocked"])
-
-    def test_order_selectors_route_only_the_owning_browser_without_unlocking_access(self):
-        order = self.create_order("beta")
-        stranger = self.other_client()
-        for selector in ({"order_id": order["id"]}, {"order_reference": order["reference"]}):
-            with self.subTest(selector=selector):
-                own = self.client.get("/api/bootstrap", params=selector)
-                self.assertEqual(own.status_code, 200, own.text)
-                body = own.json()
-                self.assertEqual(body["collection"]["id"], "beta")
-                self.assertEqual(body["latest_order"]["id"], order["id"])
-                self.assertEqual(body["latest_order"]["status"], "pending")
-                self.assertFalse(body["access"]["unlocked"])
-                other = stranger.get("/api/bootstrap", params=selector)
-                self.assertEqual(other.status_code, 404, other.text)
-                self.assertNotIn(order["reference"], other.text)
-        self.assertIn(self.client.get("/media/beta/v1/image-5").status_code, (401, 403, 404))
-        self.assertEqual(self.rows("SELECT id FROM purchases"), [])
 
     def test_three_previews_are_public_but_paid_originals_and_zip_are_private(self):
         bootstrap = self.bootstrap()
@@ -359,7 +349,7 @@ class GuestPurchaseTests(IsolatedProject):
             self.assertTrue(all(not name.startswith("/") and ".." not in Path(name).parts for name in archive.namelist()))
 
     def test_price_and_order_snapshot_are_server_authoritative(self):
-        tampered = self.post("/api/orders", {"collection_id": "alpha", "payment_method": "alipay", "amount_cents": 1})
+        tampered = self.post("/api/orders", {"collection_id": "alpha", "amount_cents": 1})
         self.assertEqual(tampered.status_code, 422)
         self.assertEqual(self.rows("SELECT id FROM orders"), [])
         order = self.create_order()
@@ -372,24 +362,9 @@ class GuestPurchaseTests(IsolatedProject):
         stored_after = self.rows("SELECT * FROM orders WHERE id=?", (order["id"],))[0]
         self.assertEqual(stored_after["amount_cents"], 1200)
 
-    def test_pending_order_cannot_be_read_refreshed_or_paid_by_another_session(self):
-        order = self.create_order()
-        stranger = self.other_client()
-        self.assertIn(stranger.get(f"/api/orders/{order['id']}").status_code, (403, 404))
-        self.assertIn(self.post(f"/api/orders/{order['id']}/refresh", client=stranger).status_code, (403, 404))
-        self.assertIn(self.post(f"/api/demo/orders/{order['id']}/pay", client=stranger).status_code, (403, 404))
-        self.assertEqual(self.rows("SELECT status FROM orders WHERE id=?", (order["id"],))[0]["status"], "pending")
-        self.assertEqual(self.rows("SELECT id FROM purchases"), [])
-
-    def test_payment_return_url_never_grants_access(self):
-        order = self.create_order()
-        self.client.get("/payment/return", params={"out_trade_no": order["reference"], "trade_status": "TRADE_SUCCESS", "status": "paid"})
-        self.assertFalse(self.bootstrap()["access"]["unlocked"])
-        self.assertEqual(self.rows("SELECT id FROM purchases"), [])
-
     def test_state_changing_requests_require_csrf_and_reject_another_origin(self):
         boot = self.bootstrap()
-        payload = {"collection_id": "alpha", "payment_method": "alipay"}
+        payload = {"collection_id": "alpha"}
         self.assertEqual(self.client.post("/api/orders", json=payload).status_code, 403)
         response = self.client.post("/api/orders", json=payload, headers={
             "X-CSRF-Token": boot["csrf_token"], "Origin": "https://attacker.example",
@@ -493,88 +468,172 @@ class LivePaymentTests(IsolatedProject):
         self.start_app(replace(self.settings, app_mode="live", app_url="https://testserver",
                                mail_mode="disabled", zpay_base_url="https://gateway.example",
                                zpay_pid="merchant-123", zpay_key="local-test-secret"))
-        self.app.state.gateway.query = AsyncMock()
+        # Stub ZPay's network, not our adapter: requests are recorded, replies scripted.
+        self.gateway_calls = []
+        self.gateway_reply = lambda request: httpx.Response(200, json={"code": 1, "status": 0})
 
-    def payment_values(self, order, trade="provider-payment-1"):
+        def gateway(request):
+            self.gateway_calls.append(request)
+            return self.gateway_reply(request)
+        self.app.state.gateway.transport = httpx.MockTransport(gateway)
+
+    def gateway_paid(self, trade="T7"):
+        def reply(request):
+            ref = request.url.params["out_trade_no"]
+            return httpx.Response(200, json={"code": 1, "msg": "查询订单号成功！", "trade_no": trade, "out_trade_no": ref,
+                                             "type": "wxpay", "pid": self.settings.zpay_pid, "money": "12.00", "status": 1})
+        self.gateway_reply = reply
+
+    def notification(self, order, trade="provider-payment-1", **changes):
         from app.payments import sign_params
 
-        record = self.rows("SELECT * FROM orders WHERE id=?", (order["id"],))[0]
-        cents = record["amount_cents"]
-        money = f"{cents // 100}.{cents % 100:02d}"
-        provider = {"code": 1, "status": 1, "pid": self.settings.zpay_pid,
-                    "out_trade_no": order["reference"], "trade_no": trade,
-                    "money": money, "type": "alipay"}
-        notification = {"pid": self.settings.zpay_pid, "out_trade_no": order["reference"],
-                        "trade_no": trade, "money": money, "type": "alipay",
-                        "trade_status": "TRADE_SUCCESS", "sign_type": "MD5"}
-        notification["sign"] = sign_params(notification, self.settings.zpay_key)
-        return provider, notification
+        cents = self.rows("SELECT amount_cents FROM orders WHERE id=?", (order["id"],))[0]["amount_cents"]
+        values = {"pid": self.settings.zpay_pid, "out_trade_no": order["reference"], "trade_no": trade,
+                  "money": f"{cents // 100}.{cents % 100:02d}", "type": "wxpay",
+                  "trade_status": "TRADE_SUCCESS", "sign_type": "MD5", **changes}
+        values["sign"] = sign_params(values, self.settings.zpay_key)
+        return values
 
     def notify(self, notification):
         return self.client.get("/api/payments/zpay/notify", params=notification)
 
-    def test_demo_payment_is_unavailable_in_live_mode(self):
+    def test_live_order_returns_signed_cashier_url_with_configured_pay_type(self):
         order = self.create_order()
-        response = self.post(f"/api/demo/orders/{order['id']}/pay")
-        self.assertIn(response.status_code, (403, 404))
-        self.assertEqual(self.rows("SELECT id FROM purchases"), [])
+        self.assertEqual(order["status"], "pending")
+        url = urlsplit(order["pay_url"])
+        self.assertEqual((url.scheme, url.netloc, url.path), ("https", "gateway.example", "/submit.php"))
+        query = dict(parse_qsl(url.query))
+        self.assertEqual((query["type"], query["out_trade_no"], query["money"]), ("wxpay", order["reference"], "12.00"))
+        self.assertEqual(self.client.get(f"/api/orders/{order['id']}").json()["pay_url"], order["pay_url"])
+        self.assertEqual(self.bootstrap()["latest_order"]["pay_url"], order["pay_url"])
+        self.assertEqual(self.client.get(f"/checkout/zpay/{order['id']}").status_code, 404)
+
+    def test_refresh_settles_the_order_once_the_gateway_reports_it_paid(self):
+        order = self.create_order()
+        self.gateway_paid()
+        result = self.post(f"/api/orders/{order['id']}/refresh")
+        self.assertEqual(result.status_code, 200, result.text)
+        self.assertEqual(result.json()["status"], "paid")
+        query = self.gateway_calls[0].url
+        self.assertEqual((query.path, query.params["act"], query.params["out_trade_no"]), ("/api.php", "order", order["reference"]))
+        self.assertTrue(self.bootstrap()["access"]["unlocked"])
+
+    def test_refresh_stays_pending_when_gateway_says_unpaid_errors_or_is_unreachable(self):
+        order = self.create_order()
+
+        def unreachable(request):
+            raise httpx.ConnectError("down")
+        replies = {"unpaid": lambda r: httpx.Response(200, json={"code": 1, "status": 0}),
+                   "error code": lambda r: httpx.Response(200, json={"code": -1, "msg": "订单不存在"}),
+                   "http 500": lambda r: httpx.Response(500, text="oops"),
+                   "unreachable": unreachable}
+        for label, reply in replies.items():
+            with self.subTest(label):
+                self.gateway_reply = reply
+                result = self.post(f"/api/orders/{order['id']}/refresh")
+                self.assertEqual(result.status_code, 200, result.text)
+                self.assertEqual(result.json()["status"], "pending")
+                self.assertFalse(self.bootstrap()["access"]["unlocked"])
+
+    def test_buying_again_reuses_the_open_order_after_checking_it_is_unpaid(self):
+        first = self.create_order()
+        self.assertEqual(self.gateway_calls, [])
+        old = "UPDATE orders SET created_at=created_at-86400"  # age no longer matters
+        with sqlite3.connect(self.settings.database_path) as con:
+            con.execute(old)
+        again = self.create_order()
+        self.assertEqual((again["id"], again["status"], again["pay_url"]), (first["id"], "pending", first["pay_url"]))
+        self.assertEqual(len(self.gateway_calls), 1)
+
+    def test_buying_again_settles_an_order_paid_before_its_notify_arrived(self):
+        first = self.create_order()
+        self.gateway_paid()
+        again = self.create_order()
+        self.assertEqual((again["id"], again["status"], again["pay_url"]), (first["id"], "paid", None))
+        self.assertTrue(self.bootstrap()["access"]["unlocked"])
+        self.assertEqual(len(self.rows("SELECT id FROM orders")), 1)
 
     def test_forged_notification_cannot_grant_access_or_trigger_provider_query(self):
         order = self.create_order()
-        provider, notification = self.payment_values(order)
-        self.app.state.gateway.query.return_value = provider
+        notification = self.notification(order)
         notification["sign"] = "0" * 32
-        result = self.notify(notification)
-        self.assertNotEqual(result.text, "success")
-        self.app.state.gateway.query.assert_not_awaited()
+        self.assertEqual(self.notify(notification).text, "fail")
+        self.assertEqual(self.gateway_calls, [])
         self.assertEqual(self.rows("SELECT id FROM purchases"), [])
 
     def test_oversized_callback_field_count_is_rejected_without_an_exception(self):
         response = self.notify({f"unexpected_{index}": "x" for index in range(33)})
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.text, "fail")
-        self.app.state.gateway.query.assert_not_awaited()
+        self.assertEqual(self.gateway_calls, [])
         self.assertEqual(self.rows("SELECT id FROM purchases"), [])
 
-    def test_signed_notification_still_requires_matching_confirmed_provider_payment(self):
+    def test_signed_notification_for_wrong_amount_or_unknown_order_is_rejected(self):
         order = self.create_order()
-        provider, notification = self.payment_values(order)
-        mismatches = ({"money": "0.01"}, {"pid": "another-merchant"},
-                      {"out_trade_no": "different-order"}, {"status": 0},
-                      {"trade_no": "different-transaction"})
-        for change in mismatches:
-            with self.subTest(provider_change=change):
-                self.app.state.gateway.query.return_value = {**provider, **change}
-                result = self.notify(notification)
-                self.assertNotEqual(result.text, "success")
+        for changes in ({"money": "0.01"}, {"out_trade_no": "unknown-order"}, {"money": "abc"}):
+            with self.subTest(changes=changes):
+                self.assertEqual(self.notify(self.notification(order, **changes)).text, "fail")
                 self.assertEqual(self.rows("SELECT id FROM purchases"), [])
                 self.assertFalse(self.bootstrap()["access"]["unlocked"])
 
-    def test_valid_payment_callback_is_idempotent_and_collection_scoped(self):
+    def test_signed_unpaid_notification_is_acknowledged_without_unlocking(self):
         order = self.create_order()
-        provider, notification = self.payment_values(order)
-        self.app.state.gateway.query.return_value = provider
+        response = self.notify(self.notification(order, trade_status="WAIT_BUYER_PAY"))
+        self.assertEqual(response.text, "success")
+        self.assertEqual(self.rows("SELECT id FROM purchases"), [])
+        self.assertFalse(self.bootstrap()["access"]["unlocked"])
+
+    def test_signed_paid_notification_alone_settles_idempotently_and_collection_scoped(self):
+        order = self.create_order()
+        notification = self.notification(order)
         first = self.notify(notification)
         self.assertEqual(first.text, "success", first.text)
         repeated = self.notify(notification)
         self.assertEqual(repeated.text, "success", repeated.text)
+        self.assertEqual(self.gateway_calls, [])
         self.assertEqual(len(self.rows("SELECT id FROM purchases")), 1)
-        self.assertEqual(self.rows("SELECT status FROM orders WHERE id=?", (order["id"],))[0]["status"], "paid")
         self.assertTrue(self.bootstrap()["access"]["unlocked"])
         self.assertFalse(self.bootstrap(collection_id="beta")["access"]["unlocked"])
 
     def test_one_provider_transaction_cannot_pay_for_two_orders(self):
         first = self.create_order()
-        provider, notification = self.payment_values(first)
-        self.app.state.gateway.query.return_value = provider
-        self.assertEqual(self.notify(notification).text, "success")
+        self.assertEqual(self.notify(self.notification(first, trade="T1")).text, "success")
         second = self.create_order("beta")
-        provider2, notification2 = self.payment_values(second, trade=provider["trade_no"])
-        self.app.state.gateway.query.return_value = provider2
-        self.assertNotEqual(self.notify(notification2).text, "success")
+        self.assertEqual(self.notify(self.notification(second, trade="T1")).text, "fail")
         self.assertEqual(len(self.rows("SELECT id FROM purchases")), 1)
         self.assertFalse(self.bootstrap(collection_id="beta")["access"]["unlocked"])
 
+    def test_order_selectors_route_only_the_owning_browser_without_unlocking_access(self):
+        order = self.create_order("beta")
+        stranger = self.other_client()
+        for selector in ({"order_id": order["id"]}, {"order_reference": order["reference"]}):
+            with self.subTest(selector=selector):
+                own = self.client.get("/api/bootstrap", params=selector)
+                self.assertEqual(own.status_code, 200, own.text)
+                body = own.json()
+                self.assertEqual(body["collection"]["id"], "beta")
+                self.assertEqual(body["latest_order"]["id"], order["id"])
+                self.assertEqual(body["latest_order"]["status"], "pending")
+                self.assertFalse(body["access"]["unlocked"])
+                other = stranger.get("/api/bootstrap", params=selector)
+                self.assertEqual(other.status_code, 404, other.text)
+                self.assertNotIn(order["reference"], other.text)
+        self.assertIn(self.client.get("/media/beta/v1/image-5").status_code, (401, 403, 404))
+        self.assertEqual(self.rows("SELECT id FROM purchases"), [])
+
+    def test_pending_order_cannot_be_read_refreshed_or_paid_by_another_session(self):
+        order = self.create_order()
+        stranger = self.other_client()
+        self.assertIn(stranger.get(f"/api/orders/{order['id']}").status_code, (403, 404))
+        self.assertIn(self.post(f"/api/orders/{order['id']}/refresh", client=stranger).status_code, (403, 404))
+        self.assertEqual(self.rows("SELECT status FROM orders WHERE id=?", (order["id"],))[0]["status"], "pending")
+        self.assertEqual(self.rows("SELECT id FROM purchases"), [])
+
+    def test_payment_return_url_never_grants_access(self):
+        order = self.create_order()
+        self.client.get("/payment/return", params={"out_trade_no": order["reference"], "trade_status": "TRADE_SUCCESS", "status": "paid"})
+        self.assertFalse(self.bootstrap()["access"]["unlocked"])
+        self.assertEqual(self.rows("SELECT id FROM purchases"), [])
 
 class ModeIsolationTests(IsolatedProject):
     def test_demo_sessions_orders_and_email_tokens_cannot_unlock_live_content(self):
@@ -596,16 +655,101 @@ class ModeIsolationTests(IsolatedProject):
         self.assertFalse(self.bootstrap()["access"]["unlocked"])
 
 
+class ZPaySigningTests(unittest.TestCase):
+    """Signatures are checked against MD5 literals computed outside the code, per the ZPay doc."""
+
+    def setUp(self):
+        from app.payments import ZPay
+        self.gateway = ZPay(Settings(app_mode="live", app_url="https://shop.example",
+                                     zpay_base_url="https://gw.example", zpay_pid="1001",
+                                     zpay_key="TESTKEY", zpay_pay_type="wxpay"))
+
+    def test_pay_url_is_a_signed_submit_get_with_raw_values_signed_and_url_encoded(self):
+        url = urlsplit(self.gateway.pay_url("R20261118001", 1200, "Alpha 合集 & more"))
+        self.assertEqual((url.scheme, url.netloc, url.path), ("https", "gw.example", "/submit.php"))
+        self.assertEqual(dict(parse_qsl(url.query)), {
+            "pid": "1001", "type": "wxpay", "out_trade_no": "R20261118001",
+            "notify_url": "https://shop.example/api/payments/zpay/notify",
+            "return_url": "https://shop.example/payment/return",
+            "name": "Alpha 合集 & more", "money": "12.00",
+            "sign": "e02938d20ad4ea4a669b3101ddc3d60b", "sign_type": "MD5",
+        })
+
+    def notification(self, **changes):
+        values = {"pid": "1001", "name": "Alpha", "money": "12.00", "out_trade_no": "R20261118001",
+                  "trade_no": "T9", "param": "", "trade_status": "TRADE_SUCCESS", "type": "wxpay",
+                  "sign": "5786c97cb3198c792d2306fa686095a1", "sign_type": "MD5"}
+        values.update(changes)
+        return values
+
+    def test_genuine_notification_is_valid_and_exposes_settlement_fields(self):
+        result = self.gateway.parse_notify(self.notification())
+        self.assertTrue(result.valid)
+        self.assertTrue(result.success)
+        self.assertEqual((result.reference, result.cents, result.trade_no), ("R20261118001", 1200, "T9"))
+
+    def test_tampered_or_unsigned_notification_is_invalid(self):
+        for changes in ({"money": "0.01"}, {"out_trade_no": "OTHER"}, {"sign": ""}, {"sign": "0" * 32}):
+            with self.subTest(changes=changes):
+                self.assertFalse(self.gateway.parse_notify(self.notification(**changes)).valid)
+
+    def test_signed_non_success_status_is_valid_but_not_success(self):
+        values = self.notification(trade_status="WAIT_BUYER_PAY", sign="")
+        from app.payments import sign_params
+        values["sign"] = sign_params(values, "TESTKEY")
+        result = self.gateway.parse_notify(values)
+        self.assertTrue(result.valid)
+        self.assertFalse(result.success)
+
 class ProductionSettingsTests(unittest.TestCase):
     def test_live_settings_require_https_payment_credentials_and_no_file_mail(self):
         valid = Settings(app_mode="live", app_url="https://example.com", mail_mode="disabled",
                          zpay_base_url="https://gateway.example", zpay_pid="merchant", zpay_key="secret")
         valid.validate()
         for overrides in ({"app_url": "http://example.com"}, {"zpay_key": ""},
-                          {"zpay_base_url": "http://gateway.example"}, {"mail_mode": "file"}):
+                          {"zpay_base_url": "http://gateway.example"}, {"mail_mode": "file"},
+                          {"zpay_pay_type": "bitcoin"}):
             with self.subTest(overrides=overrides), self.assertRaises(ValueError):
                 replace(valid, **overrides).validate()
 
+
+class AnalyticsTests(IsolatedProject):
+    """51.la loads in the background; CSP permits its inline loader by hash, never 'unsafe-inline'."""
+
+    def setUp(self):
+        super().setUp()
+        self.start_app()
+        self.response = self.client.get("/")
+        csp = self.response.headers["Content-Security-Policy"]
+        self.directives = {d.split()[0]: d.split()[1:] for d in csp.split("; ")}
+
+    def test_no_third_party_script_can_block_page_rendering(self):
+        # A parser-blocking third-party <script src> left the storefront blank for
+        # ~129s when sdk.51.la stalled. Only our own assets may load as plain tags.
+        for tag in re.findall(r"<script\b[^>]*\bsrc=[^>]*>", self.response.text):
+            src = re.search(r'src="([^"]+)"', tag).group(1)
+            if not src.startswith("/assets/"):
+                self.assertRegex(tag, r"\b(async|defer)\b", tag)
+
+    def test_51la_still_loads_with_the_site_id_once_its_sdk_arrives(self):
+        html = self.response.text
+        self.assertIn('"//sdk.51.la/js-sdk-pro.min.js"', html)
+        self.assertIn('"LA_COLLECT"', html)
+        self.assertIn('LA.init({id:"JqVcFfP1irXgU1KM",ck:"JqVcFfP1irXgU1KM"})', html)
+
+    def test_csp_allows_every_inline_script_on_the_page_by_hash(self):
+        import hashlib
+        inline = re.findall(r"<script>(.*?)</script>", self.response.text, re.S)
+        self.assertTrue(inline)
+        for body in inline:
+            digest = base64.b64encode(hashlib.sha256(body.encode()).digest()).decode()
+            self.assertIn(f"'sha256-{digest}'", self.directives["script-src"])
+
+    def test_csp_allows_51la_sdk_and_beacons_without_unsafe_inline(self):
+        self.assertIn("sdk.51.la", self.directives["script-src"])
+        self.assertNotIn("'unsafe-inline'", self.directives["script-src"])
+        self.assertIn("*.51.la", self.directives["connect-src"])
+        self.assertIn("*.51.la", self.directives["img-src"])
 
 if __name__ == "__main__":
     unittest.main()

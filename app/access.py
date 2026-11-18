@@ -101,9 +101,9 @@ def session_purchase(con, session_id, collection_id=None, version=None, purchase
     return con.execute(query, args).fetchone()
 
 
-def order_payload(order, catalog):
+def order_payload(order, catalog, pay_url=None):
     collection = catalog.get(order["collection_id"], order["version"])
     return {"id": order["id"], "reference": order["reference"], "status": order["status"],
             "mode": order["mode"], "collection_slug": collection["slug"] if collection else "",
             "paid_at": order["paid_at"],
-            "payment_url": f"/checkout/{'demo' if order['mode'] == 'demo' else 'zpay'}/{order['id']}" if order["status"] == "pending" else None}
+            "pay_url": pay_url if order["status"] == "pending" else None}
